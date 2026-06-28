@@ -1,0 +1,6 @@
+.env
+__pycache__/
+downloads/
+.tmp_pw/
+.tmp_ssh/
+tmp/
