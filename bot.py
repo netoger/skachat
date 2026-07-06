@@ -12,6 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -39,9 +40,10 @@ CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "12"))
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", os.getenv("GROQ_TIMEOUT_SECONDS", "45")))
 
 MAX_FILE_SIZE = MAX_DOWNLOAD_MB * 1024 * 1024
-DOWNLOAD_DIR = Path("downloads")
-SYSTEM_PROMPT_PATH = Path("/app/system_prompt.txt")
-INSTAGRAM_COOKIES_PATH = Path("/app/instagram_cookies.txt")
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOAD_DIR = BASE_DIR / "downloads"
+SYSTEM_PROMPT_PATH = BASE_DIR / "system_prompt.txt"
+INSTAGRAM_COOKIES_PATH = BASE_DIR / "instagram_cookies.txt"
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 SUPPORTED_HINTS = ("tiktok.com", "instagram.com", "youtu.be", "youtube.com")
@@ -79,7 +81,12 @@ def extract_url(text: str) -> Optional[str]:
     match = URL_RE.search(text or "")
     if not match:
         return None
-    return match.group(0).strip()
+    url = match.group(0).strip()
+    # Отрезаем хвостовую пунктуацию: "смотри (https://youtu.be/x)," -> корректная ссылка
+    url = url.rstrip(".,;:!?\"'»›")
+    if url.endswith(")") and "(" not in url:
+        url = url.rstrip(")")
+    return url or None
 
 
 def looks_supported(url: str) -> bool:
@@ -177,6 +184,12 @@ def resolve_ai_config() -> tuple[str, str, str]:
 async def safe_edit_status(message, text: str) -> None:
     try:
         await message.edit_text(text)
+    except BadRequest as exc:
+        # "Message is not modified" — текст совпал со старым, дублировать не нужно
+        if "not modified" in str(exc).lower():
+            return
+        logger.exception("Failed to edit status message")
+        await message.reply_text(text, reply_markup=MAIN_KEYBOARD)
     except Exception:
         logger.exception("Failed to edit status message")
         await message.reply_text(text, reply_markup=MAIN_KEYBOARD)
@@ -207,8 +220,9 @@ def choose_estimated_size(info: dict) -> Optional[int]:
         candidates.append(item.get("filesize_approx"))
 
     for candidate in candidates:
-        if isinstance(candidate, int) and candidate > 0:
-            return candidate
+        # yt-dlp может вернуть размер как float (filesize_approx), учитываем оба типа
+        if isinstance(candidate, (int, float)) and candidate > 0:
+            return int(candidate)
     return None
 
 
@@ -429,6 +443,13 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         )
         return
 
+    if not answer:
+        await message.reply_text(
+            "ИИ вернул пустой ответ. Попробуй переформулировать вопрос.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
     new_history = [
         *history,
         {"role": "user", "content": text},
@@ -443,7 +464,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not message.text:
         return
 
-    cleanup_stale_downloads()
+    # Уборка в отдельном потоке, чтобы не блокировать обработку сообщений
+    await asyncio.to_thread(cleanup_stale_downloads)
 
     text = message.text.strip()
     if not text:
