@@ -48,9 +48,38 @@ CLEANUP_MAX_AGE_HOURS=24
 CHAT_HISTORY_LIMIT=12
 AI_TIMEOUT_SECONDS=45
 GROQ_TIMEOUT_SECONDS=45
+REQUIRED_CHANNEL=@siskysindnysuiny
+REQUIRED_CHANNEL_URL=https://t.me/siskysindnysuiny
+SUBSCRIPTION_CACHE_SECONDS=300
+CONCURRENT_UPDATES=8
+MAX_CONCURRENT_DOWNLOADS=3
 ```
 
 If `AI_PROVIDER=auto`, the bot prefers Gemini when `GEMINI_API_KEY` is set, then xAI Grok, then Groq.
+
+## Subscription gate
+
+If `REQUIRED_CHANNEL` is set, the bot only replies to users who are subscribed to that
+channel. Before it works:
+
+1. Add the bot as an **administrator** of the channel (any admin right is enough — bots
+   cannot be plain members of channels, only admins, and `getChatMember` requires that).
+2. Set `REQUIRED_CHANNEL` to the channel's `@username` and `REQUIRED_CHANNEL_URL` to its
+   public link, so the "Open channel" button works.
+
+On startup the bot checks its own admin status in the channel and logs a warning if it
+isn't an admin — check `docker logs` if subscribers report the gate never passes.
+Verification results are cached per user for `SUBSCRIPTION_CACHE_SECONDS` to avoid hitting
+Telegram's API on every message. Leave `REQUIRED_CHANNEL` empty to disable the gate.
+
+## Reliability controls
+
+- `CONCURRENT_UPDATES` lets the bot process multiple users' messages in parallel instead of
+  queuing everyone behind one slow request (download or AI call).
+- `MAX_CONCURRENT_DOWNLOADS` caps how many video downloads can run at the same time across
+  all users, so a burst of requests can't exhaust disk/CPU on the server. Extra requests are
+  queued with a "server is busy" notice instead of failing.
+- Each user can only have one download in flight at a time.
 
 ## Personality configuration
 

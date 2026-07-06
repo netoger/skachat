@@ -7,14 +7,22 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -39,15 +47,32 @@ CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "12"))
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", os.getenv("GROQ_TIMEOUT_SECONDS", "45")))
 
+# Channel-subscription gate. Leave REQUIRED_CHANNEL empty to disable the gate entirely.
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "").strip()
+SUBSCRIPTION_CACHE_SECONDS = int(os.getenv("SUBSCRIPTION_CACHE_SECONDS", "300"))
+
+# Concurrency / reliability knobs.
+CONCURRENT_UPDATES = int(os.getenv("CONCURRENT_UPDATES", "8"))
+MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "3"))
+
 MAX_FILE_SIZE = MAX_DOWNLOAD_MB * 1024 * 1024
 BASE_DIR = Path(__file__).resolve().parent
+# Defaults resolve next to bot.py so the bot runs both locally and in Docker
+# (WORKDIR /app), regardless of the current working directory.
 DOWNLOAD_DIR = BASE_DIR / "downloads"
-SYSTEM_PROMPT_PATH = BASE_DIR / "system_prompt.txt"
-INSTAGRAM_COOKIES_PATH = BASE_DIR / "instagram_cookies.txt"
+SYSTEM_PROMPT_PATH = Path(os.getenv("SYSTEM_PROMPT_PATH", str(BASE_DIR / "system_prompt.txt")))
+INSTAGRAM_COOKIES_PATH = Path(os.getenv("INSTAGRAM_COOKIES_PATH", str(BASE_DIR / "instagram_cookies.txt")))
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
-SUPPORTED_HINTS = ("tiktok.com", "instagram.com", "youtu.be", "youtube.com")
+ALLOWED_DOMAINS = (
+    "tiktok.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+)
 RESTART_BUTTON_TEXT = "Перезапустить"
+VERIFY_SUBSCRIPTION_CALLBACK = "verify_subscription"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -57,6 +82,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
     input_field_placeholder="Напиши сообщение или отправь ссылку на видео",
 )
+
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -90,8 +117,15 @@ def extract_url(text: str) -> Optional[str]:
 
 
 def looks_supported(url: str) -> bool:
-    lowered = url.lower()
-    return any(hint in lowered for hint in SUPPORTED_HINTS)
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+
+    if not hostname:
+        return False
+
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in ALLOWED_DOMAINS)
 
 
 def sanitize_name(value: str) -> str:
@@ -108,7 +142,7 @@ def build_ydl_opts(skip_download: bool = False, outtmpl: Optional[str] = None) -
         "quiet": True,
         "no_warnings": True,
         "windowsfilenames": True,
-        "restrictfilenames": False,
+        "restrictfilenames": True,
     }
 
     if skip_download:
@@ -200,6 +234,97 @@ async def safe_delete_message(message) -> None:
         await message.delete()
     except Exception:
         logger.exception("Failed to delete message")
+
+
+def build_subscription_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    if REQUIRED_CHANNEL_URL:
+        buttons.append([InlineKeyboardButton("📢 Открыть канал", url=REQUIRED_CHANNEL_URL)])
+    buttons.append([InlineKeyboardButton("✅ Я подписался", callback_data=VERIFY_SUBSCRIPTION_CALLBACK)])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+    except Exception:
+        logger.exception("Subscription check failed for user_id=%s", user_id)
+        return False
+    return member.status in ("member", "administrator", "creator")
+
+
+async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True
+
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return False
+
+    if context.user_data.get("sub_verified") and time.time() < context.user_data.get("sub_verified_until", 0):
+        return True
+
+    subscribed = await is_channel_member(context, user.id)
+    context.user_data["sub_verified"] = subscribed
+    context.user_data["sub_verified_until"] = time.time() + SUBSCRIPTION_CACHE_SECONDS
+
+    if not subscribed:
+        await message.reply_text(
+            "Чтобы пользоваться ботом, подпишись на канал и нажми «Я подписался».",
+            reply_markup=build_subscription_keyboard(),
+        )
+    return subscribed
+
+
+async def handle_subscription_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    subscribed = await is_channel_member(context, query.from_user.id)
+    context.user_data["sub_verified"] = subscribed
+    context.user_data["sub_verified_until"] = time.time() + SUBSCRIPTION_CACHE_SECONDS
+
+    if subscribed:
+        await query.answer("Подписка подтверждена!")
+        try:
+            await query.edit_message_text("Спасибо за подписку! Бот доступен.")
+        except Exception:
+            logger.exception("Failed to edit subscription prompt message")
+        if query.message:
+            await query.message.reply_text(
+                "Отправь ссылку на TikTok, Instagram или YouTube, и я попробую скачать видео.\n\n"
+                "Если пришлешь обычный текст, я просто отвечу как собеседник.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+    else:
+        await query.answer(
+            "Подписка не найдена. Подпишись на канал и попробуй еще раз.",
+            show_alert=True,
+        )
+
+
+async def post_init(application: Application) -> None:
+    if not REQUIRED_CHANNEL:
+        return
+
+    try:
+        me = await application.bot.get_chat_member(REQUIRED_CHANNEL, application.bot.id)
+        if me.status not in ("administrator", "creator"):
+            logger.warning(
+                "Bot is not an administrator of %s — subscription checks will always fail. "
+                "Add the bot as an administrator of the channel.",
+                REQUIRED_CHANNEL,
+            )
+        else:
+            logger.info("Subscription gate active for channel %s", REQUIRED_CHANNEL)
+    except Exception:
+        logger.exception(
+            "Could not verify bot membership in %s. Make sure REQUIRED_CHANNEL is correct "
+            "and the bot is added as an administrator of the channel.",
+            REQUIRED_CHANNEL,
+        )
 
 
 def probe_video(url: str) -> dict:
@@ -302,6 +427,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
+    if not await ensure_subscribed(update, context):
+        return
+
     reset_user_state(context.user_data)
     await update.message.reply_text(
         "Отправь ссылку на TikTok, Instagram или YouTube, и я попробую скачать видео.\n\n"
@@ -313,6 +441,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def reset_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
+        return
+
+    if not await ensure_subscribed(update, context):
         return
 
     reset_user_state(context.user_data)
@@ -331,70 +462,87 @@ async def handle_download(
     if not message:
         return
 
-    status = await message.reply_text("Проверяю ссылку и доступность видео...")
+    if context.user_data.get("downloading"):
+        await message.reply_text(
+            "У тебя уже идет загрузка, подожди ее завершения.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
 
+    context.user_data["downloading"] = True
+    job_dir: Optional[Path] = None
     try:
-        info = await asyncio.to_thread(probe_video, url)
-        estimated_size = choose_estimated_size(info)
-        title = sanitize_name(info.get("title") or "video")
-
-        if estimated_size and estimated_size > MAX_FILE_SIZE:
-            await safe_edit_status(
-                status,
-                f"Видео слишком большое для отправки ботом: примерно {estimated_size / 1024 / 1024:.1f} MB.\n"
-                f"Текущий лимит: {MAX_DOWNLOAD_MB} MB."
-            )
-            return
-
-        await safe_edit_status(status, f"Скачиваю: {title}")
-        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-
-        job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
-        file_path = await asyncio.to_thread(download_video, url, job_dir)
-
-        actual_size = file_path.stat().st_size
-        if actual_size > MAX_FILE_SIZE:
-            await safe_edit_status(
-                status,
-                f"Файл скачался, но оказался слишком большим: {actual_size / 1024 / 1024:.1f} MB.\n"
-                f"Текущий лимит: {MAX_DOWNLOAD_MB} MB."
-            )
-            return
-
-        caption = f"{title}\nИсточник: {url}"
-        with file_path.open("rb") as file_handle:
-            await message.reply_document(
-                document=file_handle,
-                caption=caption[:1024],
-                reply_markup=MAIN_KEYBOARD,
-            )
-
-        await safe_delete_message(status)
-    except DownloadError as exc:
-        logger.exception("Download failed")
-        details = str(exc)[:500]
-        if "Requested content is not available, rate-limit reached or login required" in details:
-            text = (
-                "Instagram уперся в логин или лимиты. Чтобы такие ссылки снова качались, нужно "
-                "подложить cookies от залогиненного Instagram в `/opt/skachat/instagram_cookies.txt`, "
-                "потом перезапустить `bash /opt/skachat/deploy.sh`.\n\n"
-                f"Детали: {details}"
+        if download_semaphore.locked():
+            status = await message.reply_text(
+                "Сервер сейчас занят другими загрузками, подождите немного..."
             )
         else:
-            text = (
-                "Не удалось скачать видео. Возможно, ссылка приватная, ограничена по региону или временно не поддерживается.\n\n"
-                f"Детали: {details}"
-            )
-        await safe_edit_status(status, text)
-    except Exception as exc:
-        logger.exception("Unexpected download error")
-        await safe_edit_status(
-            status,
-            "Произошла ошибка во время скачивания. Нажми «Перезапустить», если хочешь сбросить состояние, "
-            f"и попробуй еще раз.\n\nДетали: {str(exc)[:300]}"
-        )
+            status = await message.reply_text("Проверяю ссылку и доступность видео...")
+
+        async with download_semaphore:
+            try:
+                info = await asyncio.to_thread(probe_video, url)
+                estimated_size = choose_estimated_size(info)
+                title = sanitize_name(info.get("title") or "video")
+
+                if estimated_size and estimated_size > MAX_FILE_SIZE:
+                    await safe_edit_status(
+                        status,
+                        f"Видео слишком большое для отправки ботом: примерно {estimated_size / 1024 / 1024:.1f} MB.\n"
+                        f"Текущий лимит: {MAX_DOWNLOAD_MB} MB."
+                    )
+                    return
+
+                await safe_edit_status(status, f"Скачиваю: {title}")
+                await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+
+                job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
+                file_path = await asyncio.to_thread(download_video, url, job_dir)
+
+                actual_size = file_path.stat().st_size
+                if actual_size > MAX_FILE_SIZE:
+                    await safe_edit_status(
+                        status,
+                        f"Файл скачался, но оказался слишком большим: {actual_size / 1024 / 1024:.1f} MB.\n"
+                        f"Текущий лимит: {MAX_DOWNLOAD_MB} MB."
+                    )
+                    return
+
+                caption = f"{title}\nИсточник: {url}"
+                with file_path.open("rb") as file_handle:
+                    await message.reply_document(
+                        document=file_handle,
+                        caption=caption[:1024],
+                        reply_markup=MAIN_KEYBOARD,
+                    )
+
+                await safe_delete_message(status)
+            except DownloadError as exc:
+                logger.exception("Download failed for url=%s", url)
+                details = str(exc)
+                if "Requested content is not available, rate-limit reached or login required" in details:
+                    logger.warning(
+                        "Instagram requires login/cookies. Add instagram_cookies.txt and redeploy to fix."
+                    )
+                    text = (
+                        "Instagram сейчас ограничивает доступ без логина. "
+                        "Администратор бота уже знает об этом, попробуй другую ссылку или повтори позже."
+                    )
+                else:
+                    text = (
+                        "Не удалось скачать видео. Возможно, ссылка приватная, ограничена по региону "
+                        "или временно не поддерживается. Попробуй другую ссылку."
+                    )
+                await safe_edit_status(status, text)
+            except Exception:
+                logger.exception("Unexpected download error for url=%s", url)
+                await safe_edit_status(
+                    status,
+                    "Произошла ошибка во время скачивания. Нажми «Перезапустить» и попробуй еще раз.",
+                )
     finally:
-        if "job_dir" in locals() and job_dir.exists():
+        context.user_data["downloading"] = False
+        if job_dir is not None and job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
@@ -434,11 +582,10 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             reply_markup=MAIN_KEYBOARD,
         )
         return
-    except Exception as exc:
+    except Exception:
         logger.exception("Unexpected chat error")
         await message.reply_text(
-            "Не получилось ответить сейчас. Нажми «Перезапустить» и попробуй еще раз.\n\n"
-            f"Детали: {str(exc)[:200]}",
+            "Не получилось ответить сейчас. Нажми «Перезапустить» и попробуй еще раз.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -462,6 +609,9 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message or not message.text:
+        return
+
+    if not await ensure_subscribed(update, context):
         return
 
     # Уборка в отдельном потоке, чтобы не блокировать обработку сообщений
@@ -495,12 +645,26 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and configure it.")
 
+    if REQUIRED_CHANNEL and not REQUIRED_CHANNEL_URL:
+        logger.warning(
+            "REQUIRED_CHANNEL is set but REQUIRED_CHANNEL_URL is empty — the subscribe button will have no link."
+        )
+
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     cleanup_stale_downloads()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(CONCURRENT_UPDATES)
+        .post_init(post_init)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_dialog))
+    application.add_handler(
+        CallbackQueryHandler(handle_subscription_check, pattern=f"^{VERIFY_SUBSCRIPTION_CALLBACK}$")
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Bot is running")
