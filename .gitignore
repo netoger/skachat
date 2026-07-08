@@ -4,3 +4,8 @@ downloads/
 .tmp_pw/
 .tmp_ssh/
 tmp/
+# Instagram cookies — секретная сессия, никогда не коммитить
+instagram_cookies.txt
+*cookies.txt
+# Personal bot prompt - only the example is tracked
+system_prompt.txt

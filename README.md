@@ -48,8 +48,8 @@ CLEANUP_MAX_AGE_HOURS=24
 CHAT_HISTORY_LIMIT=12
 AI_TIMEOUT_SECONDS=45
 GROQ_TIMEOUT_SECONDS=45
-REQUIRED_CHANNEL=@siskysindnysuiny
-REQUIRED_CHANNEL_URL=https://t.me/siskysindnysuiny
+REQUIRED_CHANNEL=@your_channel
+REQUIRED_CHANNEL_URL=https://t.me/your_channel
 SUBSCRIPTION_CACHE_SECONDS=300
 CONCURRENT_UPDATES=8
 MAX_CONCURRENT_DOWNLOADS=3
@@ -83,7 +83,7 @@ Telegram's API on every message. Leave `REQUIRED_CHANNEL` empty to disable the g
 
 ## Personality configuration
 
-The bot reads its behavior from one place only: `system_prompt.txt`.
+The bot reads its behavior from one place only: `system_prompt.txt`. The repository ships `system_prompt.example.txt` as a starting point — copy it and make it yours.
 
 On the server, edit:
 
@@ -113,7 +113,15 @@ After uploading or updating the cookies file, reload the bot:
 bash /opt/skachat/deploy.sh
 ```
 
-4. Run the bot:
+4. Create your bot personality file from the example:
+
+```bash
+cp system_prompt.example.txt system_prompt.txt
+```
+
+`system_prompt.txt` is intentionally untracked, so your personal version stays out of git. Edit it to change how the bot talks.
+
+5. Run the bot:
 
 ```bash
 python bot.py
