@@ -6,7 +6,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -42,6 +42,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
 XAI_API_KEY = os.getenv("XAI_API_KEY", "").strip()
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-4.3").strip()
+# Любой шлюз с OpenAI-совместимым API: агрегаторы моделей, self-hosted прокси
+# и т. п. Задаётся тремя переменными, потому что адрес заранее неизвестен.
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "").strip()
 MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "49"))
 CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "12"))
@@ -76,6 +81,7 @@ VERIFY_SUBSCRIPTION_CALLBACK = "verify_subscription"
 GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+CHAT_COMPLETIONS_PATH = "/chat/completions"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton(RESTART_BUTTON_TEXT)]],
@@ -187,30 +193,78 @@ def trim_history(history: list[dict]) -> list[dict]:
     return history[-CHAT_HISTORY_LIMIT:]
 
 
-def resolve_ai_config() -> tuple[str, str, str]:
+class AIConfig(NamedTuple):
+    provider: str
+    api_url: str
+    model: str
+    api_key: str
+
+
+def build_openai_url(base_url: str) -> str:
+    """Шлюзы дают адрес то как `https://host/v1`, то целиком до метода."""
+    url = base_url.rstrip("/")
+    if url.endswith(CHAT_COMPLETIONS_PATH):
+        return url
+    return url + CHAT_COMPLETIONS_PATH
+
+
+def gemini_config() -> AIConfig:
+    return AIConfig(
+        "gemini",
+        GEMINI_API_URL_TEMPLATE.format(model=GEMINI_MODEL),
+        GEMINI_MODEL,
+        GEMINI_API_KEY,
+    )
+
+
+def openai_compatible_config() -> AIConfig:
+    if not OPENAI_MODEL:
+        raise RuntimeError(
+            "OPENAI_MODEL is not configured. A gateway serves many models, "
+            "so the model name cannot be guessed."
+        )
+    return AIConfig(
+        "openai_compatible",
+        build_openai_url(OPENAI_BASE_URL),
+        OPENAI_MODEL,
+        OPENAI_API_KEY,
+    )
+
+
+def resolve_ai_config() -> AIConfig:
+    if AI_PROVIDER in ("openai", "openai_compatible"):
+        if not (OPENAI_BASE_URL and OPENAI_API_KEY):
+            raise RuntimeError("OPENAI_BASE_URL and OPENAI_API_KEY are not configured.")
+        return openai_compatible_config()
+
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is not configured.")
-        return "gemini", GEMINI_API_URL_TEMPLATE.format(model=GEMINI_MODEL), GEMINI_MODEL
+        return gemini_config()
 
     if AI_PROVIDER == "xai":
         if not XAI_API_KEY:
             raise RuntimeError("XAI_API_KEY is not configured.")
-        return "xai", XAI_API_URL, XAI_MODEL
+        return AIConfig("xai", XAI_API_URL, XAI_MODEL, XAI_API_KEY)
 
     if AI_PROVIDER == "groq":
         if not GROQ_API_KEY:
             raise RuntimeError("GROQ_API_KEY is not configured.")
-        return "groq", GROQ_API_URL, GROQ_MODEL
+        return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
+
+    # Свой шлюз идёт первым: его адрес прописывают осознанно, а ключи
+    # остальных провайдеров нередко остаются в .env с прошлых настроек.
+    if OPENAI_BASE_URL and OPENAI_API_KEY:
+        return openai_compatible_config()
 
     if GEMINI_API_KEY:
-        return "gemini", GEMINI_API_URL_TEMPLATE.format(model=GEMINI_MODEL), GEMINI_MODEL
+        return gemini_config()
 
     if XAI_API_KEY:
-        return "xai", XAI_API_URL, XAI_MODEL
+        return AIConfig("xai", XAI_API_URL, XAI_MODEL, XAI_API_KEY)
 
     if GROQ_API_KEY:
-        return "groq", GROQ_API_URL, GROQ_MODEL
+        return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
 
     raise RuntimeError("No AI provider key is configured.")
 
@@ -373,7 +427,8 @@ def download_video(url: str, job_dir: Path) -> Path:
 
 
 async def ask_ai(user_text: str, history: list[dict]) -> str:
-    provider, api_url, model = resolve_ai_config()
+    config = resolve_ai_config()
+    provider, api_url, model = config.provider, config.api_url, config.model
     timeout = httpx.Timeout(AI_TIMEOUT_SECONDS)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -400,7 +455,7 @@ async def ask_ai(user_text: str, history: list[dict]) -> str:
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}],
             }
             headers = {
-                "Authorization": f"Bearer {XAI_API_KEY if provider == 'xai' else GROQ_API_KEY}",
+                "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
             }
 

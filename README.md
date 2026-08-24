@@ -43,6 +43,9 @@ GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=openai/gpt-oss-20b
 XAI_API_KEY=your_xai_api_key
 XAI_MODEL=grok-4.3
+OPENAI_BASE_URL=https://your-gateway.example/v1
+OPENAI_API_KEY=your_gateway_api_key
+OPENAI_MODEL=model-name-from-the-gateway
 MAX_DOWNLOAD_MB=49
 CLEANUP_MAX_AGE_HOURS=24
 CHAT_HISTORY_LIMIT=12
@@ -55,7 +58,31 @@ CONCURRENT_UPDATES=8
 MAX_CONCURRENT_DOWNLOADS=3
 ```
 
-If `AI_PROVIDER=auto`, the bot prefers Gemini when `GEMINI_API_KEY` is set, then xAI Grok, then Groq.
+If `AI_PROVIDER=auto`, the bot prefers an OpenAI-compatible gateway when
+`OPENAI_BASE_URL` and `OPENAI_API_KEY` are both set, then Gemini, then xAI Grok, then Groq.
+
+## OpenAI-compatible gateways
+
+Besides the three built-in providers, the bot can talk to any endpoint that
+implements the OpenAI `chat/completions` API — model aggregators, self-hosted
+proxies, or OpenAI itself. Set `AI_PROVIDER=openai` (or leave `auto`) and fill in:
+
+- `OPENAI_BASE_URL` — either the API root (`https://host/v1`) or the full method
+  URL; the bot appends `/chat/completions` when it is missing.
+- `OPENAI_API_KEY` — sent as `Authorization: Bearer …`.
+- `OPENAI_MODEL` — required, with no default: a gateway serves many models, so
+  there is nothing sensible to guess.
+
+Reaching a provider is not a given from every host — some block whole regions
+with a bare `403`. Check from the machine that will run the bot before debugging
+the key:
+
+```bash
+cd ~/skachat && .venv/bin/python check_ai.py
+```
+
+It prints the resolved provider, URL and model, makes one real request, and
+never prints the key itself.
 
 ## Subscription gate
 
