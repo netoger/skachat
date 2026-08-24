@@ -19,7 +19,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -193,6 +193,10 @@ def trim_history(history: list[dict]) -> list[dict]:
     return history[-CHAT_HISTORY_LIMIT:]
 
 
+class AIConfigError(RuntimeError):
+    """Провайдер ИИ не настроен. Лечится правкой .env, а не перезапуском."""
+
+
 class AIConfig(NamedTuple):
     provider: str
     api_url: str
@@ -219,7 +223,7 @@ def gemini_config() -> AIConfig:
 
 def openai_compatible_config() -> AIConfig:
     if not OPENAI_MODEL:
-        raise RuntimeError(
+        raise AIConfigError(
             "OPENAI_MODEL is not configured. A gateway serves many models, "
             "so the model name cannot be guessed."
         )
@@ -234,22 +238,22 @@ def openai_compatible_config() -> AIConfig:
 def resolve_ai_config() -> AIConfig:
     if AI_PROVIDER in ("openai", "openai_compatible"):
         if not (OPENAI_BASE_URL and OPENAI_API_KEY):
-            raise RuntimeError("OPENAI_BASE_URL and OPENAI_API_KEY are not configured.")
+            raise AIConfigError("OPENAI_BASE_URL and OPENAI_API_KEY are not configured.")
         return openai_compatible_config()
 
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
-            raise RuntimeError("GEMINI_API_KEY is not configured.")
+            raise AIConfigError("GEMINI_API_KEY is not configured.")
         return gemini_config()
 
     if AI_PROVIDER == "xai":
         if not XAI_API_KEY:
-            raise RuntimeError("XAI_API_KEY is not configured.")
+            raise AIConfigError("XAI_API_KEY is not configured.")
         return AIConfig("xai", XAI_API_URL, XAI_MODEL, XAI_API_KEY)
 
     if AI_PROVIDER == "groq":
         if not GROQ_API_KEY:
-            raise RuntimeError("GROQ_API_KEY is not configured.")
+            raise AIConfigError("GROQ_API_KEY is not configured.")
         return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
 
     # Свой шлюз идёт первым: его адрес прописывают осознанно, а ключи
@@ -266,7 +270,7 @@ def resolve_ai_config() -> AIConfig:
     if GROQ_API_KEY:
         return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
 
-    raise RuntimeError("No AI provider key is configured.")
+    raise AIConfigError("No AI provider key is configured.")
 
 
 async def safe_edit_status(message, text: str) -> None:
@@ -357,6 +361,18 @@ async def handle_subscription_check(update: Update, context: ContextTypes.DEFAUL
             "Подписка не найдена. Подпишись на канал и попробуй еще раз.",
             show_alert=True,
         )
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+
+    # Сеть до Telegram с российского хостинга изредка моргает; PTB сам
+    # повторяет запрос, поэтому traceback на каждое моргание — лишний шум.
+    if isinstance(error, NetworkError):
+        logger.warning("Сеть до Telegram моргнула: %s", error)
+        return
+
+    logger.error("Необработанная ошибка", exc_info=error)
 
 
 async def post_init(application: Application) -> None:
@@ -637,6 +653,16 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             reply_markup=MAIN_KEYBOARD,
         )
         return
+    except AIConfigError as exc:
+        # Не пишем traceback: это не сбой, а незаполненный .env, и совет
+        # «нажми Перезапустить» тут только сбивает с толку — не поможет.
+        logger.error("Чат недоступен, провайдер ИИ не настроен: %s", exc)
+        await message.reply_text(
+            "Чат пока не работает: у бота не настроен ИИ-провайдер. "
+            "Скачивание видео при этом работает — пришли ссылку на TikTok, Instagram или YouTube.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
     except Exception:
         logger.exception("Unexpected chat error")
         await message.reply_text(
@@ -705,6 +731,17 @@ def main() -> None:
             "REQUIRED_CHANNEL is set but REQUIRED_CHANNEL_URL is empty — the subscribe button will have no link."
         )
 
+    try:
+        ai_config = resolve_ai_config()
+    except AIConfigError as exc:
+        logger.warning(
+            "Chat is disabled: %s Downloads will still work. "
+            "Fill in one AI provider in .env and restart.",
+            exc,
+        )
+    else:
+        logger.info("AI provider: %s, model %s", ai_config.provider, ai_config.model)
+
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     cleanup_stale_downloads()
 
@@ -721,6 +758,7 @@ def main() -> None:
         CallbackQueryHandler(handle_subscription_check, pattern=f"^{VERIFY_SUBSCRIPTION_CALLBACK}$")
     )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(on_error)
 
     logger.info("Bot is running")
     application.run_polling()
