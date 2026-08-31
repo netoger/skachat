@@ -156,6 +156,11 @@ python bot.py
 
 ## Autonomous 24/7 hosting
 
+Running on Russian shared hosting is a separate story — no Docker, no systemd,
+no SSH cron, and the network to Telegram is filtered. That setup lives in
+[README-server.md](README-server.md) together with `run_bot.py`, `net_patch.py`,
+`check_ai.py` and `skachatctl.sh`. `bot.py` itself stays platform-agnostic.
+
 If you do not want to keep your own computer running, deploy the bot to a server or cloud container.
 
 ### Option 1: VPS or cloud VM
