@@ -21,7 +21,7 @@ If you ever shared your bot token in chat, screenshots, or code, revoke it in `@
 - Shows a `Перезапустить` button that clears only the current user's dialog state
 - Can use Gemini, Groq, or xAI Grok as the chat provider
 - Loads the bot personality from one prompt file
-- Supports an optional `instagram_cookies.txt` file for logged-in Instagram downloads
+- Supports an optional `cookies.txt` file for logged-in downloads and anti-bot pages
 
 ## Setup
 
@@ -124,13 +124,28 @@ Then reload the bot:
 bash /opt/skachat/deploy.sh
 ```
 
-## Instagram cookies
+## Cookies
 
-If Instagram starts returning login or rate-limit errors, place a cookies file at:
+Two different failures are both fixed by the same file:
+
+- Instagram returns a login or rate-limit error.
+- A site answers `200` with an anti-bot page instead of the video, and yt-dlp
+  reports `Unexpected response from webpage request`. TikTok does this to
+  datacenter IP ranges — the link itself is fine and opens from a normal
+  browser. Upgrading yt-dlp does not help; the request never reaches the
+  extractor's happy path.
+
+Place a cookies file next to `bot.py`:
 
 ```bash
-/opt/skachat/instagram_cookies.txt
+cookies.txt
 ```
+
+One file covers every site: the Netscape format stores cookies per domain, so
+exporting from a logged-in browser session gives Instagram and TikTok cookies
+at once. `COOKIES_FILE` overrides the location. The older
+`instagram_cookies.txt` name still works and is used when `cookies.txt` is
+absent, so existing deployments keep running.
 
 The file must be in Netscape/Mozilla cookies format. The yt-dlp FAQ notes that you can pass a cookies file with `--cookies`, and that the file must be in that format with a `# HTTP Cookie File` or `# Netscape HTTP Cookie File` header: [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ).
 

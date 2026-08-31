@@ -67,6 +67,10 @@ BASE_DIR = Path(__file__).resolve().parent
 # (WORKDIR /app), regardless of the current working directory.
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 SYSTEM_PROMPT_PATH = Path(os.getenv("SYSTEM_PROMPT_PATH", str(BASE_DIR / "system_prompt.txt")))
+# Netscape-формат хранит куки любых доменов в одном файле, поэтому один
+# cookies.txt закрывает и Instagram, и TikTok. Старое имя оставлено, чтобы
+# у тех, кто уже положил instagram_cookies.txt, ничего не сломалось.
+COOKIES_PATH = Path(os.getenv("COOKIES_FILE", str(BASE_DIR / "cookies.txt")))
 INSTAGRAM_COOKIES_PATH = Path(os.getenv("INSTAGRAM_COOKIES_PATH", str(BASE_DIR / "instagram_cookies.txt")))
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
@@ -143,6 +147,13 @@ def build_output_template(job_dir: Path) -> str:
     return str(job_dir / "%(title).80s-%(id)s.%(ext)s")
 
 
+def resolve_cookiefile() -> Optional[Path]:
+    for path in (COOKIES_PATH, INSTAGRAM_COOKIES_PATH):
+        if path.exists():
+            return path
+    return None
+
+
 def build_ydl_opts(skip_download: bool = False, outtmpl: Optional[str] = None) -> dict:
     opts = {
         "quiet": True,
@@ -159,8 +170,9 @@ def build_ydl_opts(skip_download: bool = False, outtmpl: Optional[str] = None) -
         opts["format"] = "best[ext=mp4]/best"
         opts["noplaylist"] = True
 
-    if INSTAGRAM_COOKIES_PATH.exists():
-        opts["cookiefile"] = str(INSTAGRAM_COOKIES_PATH)
+    cookiefile = resolve_cookiefile()
+    if cookiefile is not None:
+        opts["cookiefile"] = str(cookiefile)
 
     return opts
 
@@ -591,7 +603,21 @@ async def handle_download(
             except DownloadError as exc:
                 logger.exception("Download failed for url=%s", url)
                 details = str(exc)
-                if "Requested content is not available, rate-limit reached or login required" in details:
+                if "Unexpected response from webpage request" in details:
+                    # Площадка отдала 200, но вместо страницы видео — заслон
+                    # антибота (у TikTok это SlardarWAF, признак x-tt-system-error).
+                    # Версия yt-dlp тут ни при чём, лечится файлом cookies.
+                    logger.warning(
+                        "Anti-bot page instead of the video page for url=%s. The host IP is "
+                        "blocked; add browser cookies (cookies.txt next to bot.py or COOKIES_FILE).",
+                        url,
+                    )
+                    text = (
+                        "Площадка не отдала это видео серверу бота — сработала защита от автоматических "
+                        "запросов. Ссылка тут ни при чём, с другого устройства она откроется. "
+                        "Администратор бота уже знает, попробуй позже или пришли ссылку с другой площадки."
+                    )
+                elif "Requested content is not available, rate-limit reached or login required" in details:
                     logger.warning(
                         "Instagram requires login/cookies. Add instagram_cookies.txt and redeploy to fix."
                     )

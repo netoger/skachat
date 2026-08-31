@@ -9,3 +9,5 @@ instagram_cookies.txt
 *cookies.txt
 # Personal bot prompt - only the example is tracked
 system_prompt.txt
+.venv/
+data/
