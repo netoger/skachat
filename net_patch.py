@@ -126,21 +126,20 @@ def _is_telegram(host: object) -> bool:
 
 
 def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
-    results = _original_getaddrinfo(host, port, family, type, proto, flags)
-    ipv4 = [item for item in results if item[0] == socket.AF_INET]
-
     with _lock:
         pinned = _current_ip
 
     if pinned and _is_telegram(host):
-        # Подменяем только адрес, оставляя тип сокета и порт как просили
-        if ipv4:
-            return [
-                (fam, typ, prot, canon, (pinned, addr[1]))
-                for fam, typ, prot, canon, addr in ipv4
-            ]
-        return [(socket.AF_INET, type or socket.SOCK_STREAM, proto, "", (pinned, port))]
+        # DNS для Telegram не спрашиваем вовсе: его сбой иначе ронял бы
+        # запрос, хотя рабочий адрес уже известен. Порт и тип сокета — как просили.
+        try:
+            port_num = int(port or 443)
+        except (TypeError, ValueError):  # имя службы вроде "https"
+            port_num = socket.getservbyname(str(port), "tcp")
+        return [(socket.AF_INET, type or socket.SOCK_STREAM, proto or socket.IPPROTO_TCP, "", (pinned, port_num))]
 
+    results = _original_getaddrinfo(host, port, family, type, proto, flags)
+    ipv4 = [item for item in results if item[0] == socket.AF_INET]
     return ipv4 or results
 
 
@@ -151,7 +150,9 @@ def _watchdog() -> None:
         time.sleep(RECHECK_INTERVAL)
         with _lock:
             pinned = _current_ip
-        if pinned and _tls_ok(pinned):
+        # Фильтр изредка обрывает и живое соединение: одна неудача — ещё не
+        # повод менять адрес, иначе сторож скачет между адресами туда-обратно
+        if pinned and (_tls_ok(pinned) or _tls_ok(pinned)):
             continue
 
         fresh = _pick_ip()

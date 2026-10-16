@@ -1,6 +1,6 @@
 # Telegram bot for downloading videos and chat
 
-This bot accepts links to TikTok, Instagram, and YouTube videos, sends the downloaded file back in Telegram, and also works as a chat assistant through Gemini, Groq, or xAI Grok.
+This bot accepts links to TikTok, Instagram, and YouTube videos, sends the downloaded file back in Telegram, and also works as a chat assistant through DeepSeek.
 
 Use it only for videos you own or have permission to download, and make sure your use complies with platform rules and local law.
 
@@ -19,7 +19,7 @@ If you ever shared your bot token in chat, screenshots, or code, revoke it in `@
 - Uses a single ready-made media file to avoid requiring `ffmpeg` in the basic setup
 - Removes temporary local files after processing and cleans up stale leftovers on startup
 - Shows a `Перезапустить` button that clears only the current user's dialog state
-- Can use Gemini, Groq, or xAI Grok as the chat provider
+- Chats through DeepSeek (`deepseek-flash`, thinking mode off) with a per-user daily message limit
 - Loads the bot personality from one prompt file
 - Supports an optional `cookies.txt` file for logged-in downloads and anti-bot pages
 
@@ -32,46 +32,42 @@ If you ever shared your bot token in chat, screenshots, or code, revoke it in `@
 pip install -r requirements.txt
 ```
 
-3. Copy `.env.example` to `.env` and set your bot token and one AI provider:
+3. Copy `.env.example` to `.env` and set your bot token and DeepSeek key:
 
 ```bash
 BOT_TOKEN=your_telegram_bot_token
-AI_PROVIDER=auto
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash
-GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=openai/gpt-oss-20b
-XAI_API_KEY=your_xai_api_key
-XAI_MODEL=grok-4.3
-OPENAI_BASE_URL=https://your-gateway.example/v1
-OPENAI_API_KEY=your_gateway_api_key
-OPENAI_MODEL=model-name-from-the-gateway
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_THINKING=disabled
+AI_MAX_TOKENS=1024
+AI_DAILY_LIMIT=10
+ADMIN_USER_IDS=
+CHAT_HISTORY_LIMIT=10
+AI_TIMEOUT_SECONDS=60
 MAX_DOWNLOAD_MB=49
 CLEANUP_MAX_AGE_HOURS=24
-CHAT_HISTORY_LIMIT=12
-AI_TIMEOUT_SECONDS=45
-GROQ_TIMEOUT_SECONDS=45
-REQUIRED_CHANNEL=@your_channel
-REQUIRED_CHANNEL_URL=https://t.me/your_channel
+REQUIRED_CHANNEL=
+REQUIRED_CHANNEL_URL=
 SUBSCRIPTION_CACHE_SECONDS=300
 CONCURRENT_UPDATES=8
 MAX_CONCURRENT_DOWNLOADS=3
 ```
 
-If `AI_PROVIDER=auto`, the bot prefers an OpenAI-compatible gateway when
-`OPENAI_BASE_URL` and `OPENAI_API_KEY` are both set, then Gemini, then xAI Grok, then Groq.
+## DeepSeek
 
-## OpenAI-compatible gateways
+The chat uses the OpenAI-compatible DeepSeek API (`https://api.deepseek.com`).
+Create a key at platform.deepseek.com, top up the balance, and put the key into
+`DEEPSEEK_API_KEY`.
 
-Besides the three built-in providers, the bot can talk to any endpoint that
-implements the OpenAI `chat/completions` API — model aggregators, self-hosted
-proxies, or OpenAI itself. Set `AI_PROVIDER=openai` (or leave `auto`) and fill in:
-
-- `OPENAI_BASE_URL` — either the API root (`https://host/v1`) or the full method
-  URL; the bot appends `/chat/completions` when it is missing.
-- `OPENAI_API_KEY` — sent as `Authorization: Bearer …`.
-- `OPENAI_MODEL` — required, with no default: a gateway serves many models, so
-  there is nothing sensible to guess.
+- `DEEPSEEK_MODEL` — `deepseek-flash` by default (the base model);
+  `deepseek-v4-pro` is the larger one.
+- `DEEPSEEK_THINKING` — `disabled` by default. Thinking mode is slower and
+  bills the reasoning tokens, which a chat bot does not need.
+- `AI_DAILY_LIMIT` — messages per user per day (Moscow time), `10` by default,
+  `0` disables the limit. Counters live in `data/ai_usage.json` and survive
+  restarts. A failed request does not count.
+- `ADMIN_USER_IDS` — comma-separated Telegram user IDs without the limit.
+- `AI_MAX_TOKENS` — cap on the answer length.
 
 Reaching a provider is not a given from every host — some block whole regions
 with a bare `403`. Check from the machine that will run the bot before debugging
@@ -232,14 +228,14 @@ sudo systemctl enable --now skachat-bot
 
 Create a bot with `@BotFather`, then put the token into `.env`.
 
-## Groq API key
+## DeepSeek API key
 
-Create a key in the Groq console and store it in `GROQ_API_KEY`.
+Create a key at platform.deepseek.com and store it in `DEEPSEEK_API_KEY`.
 
 ## Notes
 
 - The default size limit is kept conservative for Telegram Bot API uploads.
-- Regular text messages are sent to Groq, while supported video links are handled as downloads.
+- Regular text messages are sent to DeepSeek, while supported video links are handled as downloads.
 - The `Перезапустить` button and `/reset` clear only one user's in-memory dialog history.
 - Local temporary files are deleted after each request. If the bot crashes mid-download, stale leftovers older than `CLEANUP_MAX_AGE_HOURS` are removed on the next start or next request.
 - Some videos may be unavailable because of platform restrictions, private access, region locks, or site changes.

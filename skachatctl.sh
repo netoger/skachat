@@ -25,7 +25,7 @@ running_pids() {
 
 require_setup() {
   if [ ! -x "$VENV_PY" ]; then
-    echo "Нет окружения: $VENV_PY. Создайте его заново (см. deploy/README-server.md)." >&2
+    echo "Нет окружения: $VENV_PY. Создайте его заново (см. README-server.md)." >&2
     exit 1
   fi
   if [ ! -f "$APP_DIR/.env" ]; then
@@ -43,8 +43,10 @@ require_setup() {
 }
 
 ai_status() {
-  # Импорт bot.py не требует токена, поэтому проверка безопасна и без запуска
-  "$VENV_PY" - <<'PY' 2>/dev/null || echo "не удалось определить"
+  # Импорт bot.py не требует токена, поэтому проверка безопасна и без запуска.
+  # Подкаталог обязателен: `python -` ищет модули в текущем каталоге, и при
+  # вызове `status` из домашнего каталога bot.py просто не находился.
+  (cd "$APP_DIR" && "$VENV_PY" - <<'PY' 2>/dev/null) || echo "не удалось определить"
 import bot
 try:
     c = bot.resolve_ai_config()
@@ -55,12 +57,14 @@ PY
 }
 
 rotate_log() {
-  # Простая ротация: журнал на шаред-хостинге незаметно съедает квоту
+  # Простая ротация: журнал на шаред-хостинге незаметно съедает квоту.
+  # Копируем и обнуляем, а не переименовываем: работающий бот держит файл
+  # открытым на дозапись и после mv продолжал бы писать в журнал.1.
   if [ -f "$LOG_FILE" ]; then
     local size
     size=$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)
     if [ "$size" -gt "$LOG_MAX_BYTES" ]; then
-      mv -f "$LOG_FILE" "$LOG_FILE.1"
+      cp -f "$LOG_FILE" "$LOG_FILE.1" && : > "$LOG_FILE"
     fi
   fi
 }
@@ -125,7 +129,9 @@ case "${1:-status}" in
   status)  do_status ;;
   logs)    tail -n "${2:-50}" -f "$LOG_FILE" ;;
   ensure)
-    # Для планировщика: тихо поднимаем службу, если она упала
+    # Для планировщика: тихо поднимаем службу, если она упала, и заодно
+    # не даём журналу разрастись, пока бот неделями работает без перезапуска
+    rotate_log
     if [ -z "$(running_pids)" ]; then
       echo "$(date '+%F %T') служба не найдена, запускаю" >> "$DATA_DIR/watchdog.log"
       do_start >> "$DATA_DIR/watchdog.log" 2>&1

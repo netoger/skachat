@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import urlparse
@@ -35,22 +37,26 @@ from yt_dlp.utils import DownloadError
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-AI_PROVIDER = os.getenv("AI_PROVIDER", "auto").strip().lower()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
-XAI_API_KEY = os.getenv("XAI_API_KEY", "").strip()
-XAI_MODEL = os.getenv("XAI_MODEL", "grok-4.3").strip()
-# Любой шлюз с OpenAI-совместимым API: агрегаторы моделей, self-hosted прокси
-# и т. п. Задаётся тремя переменными, потому что адрес заранее неизвестен.
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "").strip()
+# ИИ-чат — только DeepSeek: он отвечает с российского хостинга, тогда как
+# Gemini и Groq режут запросы по региону. API у него OpenAI-совместимый.
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+# deepseek-flash — базовая модель. Режим размышлений у неё включён по
+# умолчанию, для чата он только замедляет ответ и раздувает счёт, поэтому
+# выключаем его, если не попросили явно.
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
+DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
+AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "1024"))
+# Сколько сообщений ИИ один пользователь может отправить за сутки (по Москве).
+# 0 — без ограничения. Администраторы из ADMIN_USER_IDS лимита не имеют.
+AI_DAILY_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "10"))
+ADMIN_USER_IDS = {
+    int(item) for item in re.split(r"[,\s]+", os.getenv("ADMIN_USER_IDS", "")) if item.strip().isdigit()
+}
 MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "49"))
 CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
-CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "12"))
-AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", os.getenv("GROQ_TIMEOUT_SECONDS", "45")))
+CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "10"))
+AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "60"))
 
 # Channel-subscription gate. Leave REQUIRED_CHANNEL empty to disable the gate entirely.
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
@@ -66,6 +72,9 @@ BASE_DIR = Path(__file__).resolve().parent
 # Defaults resolve next to bot.py so the bot runs both locally and in Docker
 # (WORKDIR /app), regardless of the current working directory.
 DOWNLOAD_DIR = BASE_DIR / "downloads"
+# Счётчики лимита держим в файле, иначе перезапуск бота обнулял бы их
+AI_USAGE_PATH = Path(os.getenv("AI_USAGE_FILE", str(BASE_DIR / "data" / "ai_usage.json")))
+MOSCOW_TZ = timezone(timedelta(hours=3))
 SYSTEM_PROMPT_PATH = Path(os.getenv("SYSTEM_PROMPT_PATH", str(BASE_DIR / "system_prompt.txt")))
 # Netscape-формат хранит куки любых доменов в одном файле, поэтому один
 # cookies.txt закрывает и Instagram, и TikTok. Старое имя оставлено, чтобы
@@ -82,10 +91,8 @@ ALLOWED_DOMAINS = (
 )
 RESTART_BUTTON_TEXT = "Перезапустить"
 VERIFY_SUBSCRIPTION_CALLBACK = "verify_subscription"
-GEMINI_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
+TELEGRAM_TEXT_LIMIT = 4096
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton(RESTART_BUTTON_TEXT)]],
@@ -111,7 +118,14 @@ def load_system_prompt() -> str:
         raise RuntimeError(f"Failed to load system prompt from {SYSTEM_PROMPT_PATH}") from exc
 
 
-SYSTEM_PROMPT = load_system_prompt()
+# Ответ уходит в Telegram обычным текстом, и звёздочки с решётками Markdown
+# видны как есть. Добавляем это правило в код, чтобы не зависеть от того,
+# что написано в личном system_prompt.txt.
+PLAIN_TEXT_RULE = (
+    "Отвечай обычным текстом без Markdown-разметки: не используй **, __, # и `. "
+    "Списки оформляй дефисами или цифрами."
+)
+SYSTEM_PROMPT = f"{load_system_prompt()}\n\n{PLAIN_TEXT_RULE}"
 
 
 def extract_url(text: str) -> Optional[str]:
@@ -195,6 +209,22 @@ def cleanup_stale_downloads() -> None:
             logger.exception("Failed to clean up %s", path)
 
 
+def split_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    """Режем длинный ответ на сообщения по границам абзацев, а не посреди слова."""
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind(" ", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
 def reset_user_state(user_data: dict) -> None:
     user_data.pop("chat_history", None)
 
@@ -216,73 +246,89 @@ class AIConfig(NamedTuple):
     api_key: str
 
 
-def build_openai_url(base_url: str) -> str:
-    """Шлюзы дают адрес то как `https://host/v1`, то целиком до метода."""
+def build_chat_url(base_url: str) -> str:
+    """Адрес дают то как `https://host` или `https://host/v1`, то целиком до метода."""
     url = base_url.rstrip("/")
     if url.endswith(CHAT_COMPLETIONS_PATH):
         return url
     return url + CHAT_COMPLETIONS_PATH
 
 
-def gemini_config() -> AIConfig:
-    return AIConfig(
-        "gemini",
-        GEMINI_API_URL_TEMPLATE.format(model=GEMINI_MODEL),
-        GEMINI_MODEL,
-        GEMINI_API_KEY,
-    )
-
-
-def openai_compatible_config() -> AIConfig:
-    if not OPENAI_MODEL:
-        raise AIConfigError(
-            "OPENAI_MODEL is not configured. A gateway serves many models, "
-            "so the model name cannot be guessed."
-        )
-    return AIConfig(
-        "openai_compatible",
-        build_openai_url(OPENAI_BASE_URL),
-        OPENAI_MODEL,
-        OPENAI_API_KEY,
-    )
-
-
 def resolve_ai_config() -> AIConfig:
-    if AI_PROVIDER in ("openai", "openai_compatible"):
-        if not (OPENAI_BASE_URL and OPENAI_API_KEY):
-            raise AIConfigError("OPENAI_BASE_URL and OPENAI_API_KEY are not configured.")
-        return openai_compatible_config()
+    if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY.startswith("your_"):
+        raise AIConfigError("DEEPSEEK_API_KEY is not configured.")
+    return AIConfig("deepseek", build_chat_url(DEEPSEEK_BASE_URL), DEEPSEEK_MODEL, DEEPSEEK_API_KEY)
 
-    if AI_PROVIDER == "gemini":
-        if not GEMINI_API_KEY:
-            raise AIConfigError("GEMINI_API_KEY is not configured.")
-        return gemini_config()
 
-    if AI_PROVIDER == "xai":
-        if not XAI_API_KEY:
-            raise AIConfigError("XAI_API_KEY is not configured.")
-        return AIConfig("xai", XAI_API_URL, XAI_MODEL, XAI_API_KEY)
+def today_key() -> str:
+    return datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
 
-    if AI_PROVIDER == "groq":
-        if not GROQ_API_KEY:
-            raise AIConfigError("GROQ_API_KEY is not configured.")
-        return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
 
-    # Свой шлюз идёт первым: его адрес прописывают осознанно, а ключи
-    # остальных провайдеров нередко остаются в .env с прошлых настроек.
-    if OPENAI_BASE_URL and OPENAI_API_KEY:
-        return openai_compatible_config()
+class AIUsage:
+    """Суточные счётчики сообщений ИИ по пользователям, с сохранением в файл.
 
-    if GEMINI_API_KEY:
-        return gemini_config()
+    Обработчики работают в одном цикле asyncio, а между проверкой и
+    списанием нет await, поэтому гонок между пользователями не бывает.
+    """
 
-    if XAI_API_KEY:
-        return AIConfig("xai", XAI_API_URL, XAI_MODEL, XAI_API_KEY)
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.day = today_key()
+        self.counts: dict[str, int] = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("day") == self.day:
+                self.counts = {str(k): int(v) for k, v in data.get("counts", {}).items()}
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.exception("Счётчики лимита ИИ не прочитались, начинаем с нуля")
 
-    if GROQ_API_KEY:
-        return AIConfig("groq", GROQ_API_URL, GROQ_MODEL, GROQ_API_KEY)
+    def _roll_day(self) -> None:
+        day = today_key()
+        if day != self.day:
+            self.day = day
+            self.counts = {}
 
-    raise AIConfigError("No AI provider key is configured.")
+    def _save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"day": self.day, "counts": self.counts}), encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError:
+            logger.exception("Не удалось сохранить счётчики лимита ИИ в %s", self.path)
+
+    def is_limited(self, user_id: int) -> bool:
+        return AI_DAILY_LIMIT > 0 and user_id not in ADMIN_USER_IDS
+
+    def remaining(self, user_id: int) -> int:
+        self._roll_day()
+        return max(0, AI_DAILY_LIMIT - self.counts.get(str(user_id), 0))
+
+    def take(self, user_id: int) -> bool:
+        """Списать одно сообщение. False — лимит на сегодня исчерпан."""
+        if not self.is_limited(user_id):
+            return True
+        if self.remaining(user_id) <= 0:
+            return False
+        key = str(user_id)
+        self.counts[key] = self.counts.get(key, 0) + 1
+        self._save()
+        return True
+
+    def refund(self, user_id: int) -> None:
+        """Вернуть сообщение, если ответа не случилось по вине бота или ИИ."""
+        if not self.is_limited(user_id):
+            return
+        self._roll_day()
+        key = str(user_id)
+        if self.counts.get(key, 0) > 0:
+            self.counts[key] -= 1
+            self._save()
+
+
+ai_usage = AIUsage(AI_USAGE_PATH)
 
 
 async def safe_edit_status(message, text: str) -> None:
@@ -459,47 +505,27 @@ async def ask_ai(user_text: str, history: list[dict]) -> str:
     provider, api_url, model = config.provider, config.api_url, config.model
     timeout = httpx.Timeout(AI_TIMEOUT_SECONDS)
 
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}],
+        "max_tokens": AI_MAX_TOKENS,
+        "thinking": {"type": "enabled" if DEEPSEEK_THINKING == "enabled" else "disabled"},
+    }
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+    }
+
     async with httpx.AsyncClient(timeout=timeout) as client:
-        if provider == "gemini":
-            contents = []
-            for item in history:
-                role = "model" if item["role"] == "assistant" else "user"
-                contents.append({"role": role, "parts": [{"text": item["content"]}]})
-            contents.append({"role": "user", "parts": [{"text": user_text}]})
-
-            payload = {
-                "systemInstruction": {
-                    "parts": [{"text": SYSTEM_PROMPT}],
-                },
-                "contents": contents,
-            }
-            headers = {
-                "x-goog-api-key": GEMINI_API_KEY,
-                "Content-Type": "application/json",
-            }
-        else:
-            payload = {
-                "model": model,
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_text}],
-            }
-            headers = {
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            }
-
         response = await client.post(api_url, headers=headers, json=payload)
         response.raise_for_status()
 
     data = response.json()
-    if provider == "gemini":
-        candidates = data.get("candidates") or []
-        if not candidates:
-            raise RuntimeError(f"Gemini returned no candidates: {data}")
-        parts = candidates[0].get("content", {}).get("parts", [])
-        text_parts = [part.get("text", "") for part in parts if isinstance(part, dict)]
-        return "".join(text_parts).strip()
-
-    content = data["choices"][0]["message"]["content"]
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"{provider} returned no choices: {str(data)[:300]}")
+    # reasoning_content (ход размышлений) пользователю не показываем — только ответ
+    content = choices[0].get("message", {}).get("content") or ""
     if isinstance(content, list):
         parts = [item.get("text", "") for item in content if isinstance(item, dict)]
         content = "".join(parts)
@@ -516,7 +542,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reset_user_state(context.user_data)
     await update.message.reply_text(
         "Отправь ссылку на TikTok, Instagram или YouTube, и я попробую скачать видео.\n\n"
-        "Если пришлешь обычный текст, я просто отвечу как собеседник.\n"
+        "Если пришлешь обычный текст, я просто отвечу как собеседник"
+        + (f" (до {AI_DAILY_LIMIT} сообщений в сутки)" if AI_DAILY_LIMIT > 0 else "")
+        + ".\n"
         f"Кнопка «{RESTART_BUTTON_TEXT}» сбрасывает только твой диалог.",
         reply_markup=MAIN_KEYBOARD,
     )
@@ -648,38 +676,57 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     if not message:
         return
 
+    user_id = update.effective_user.id if update.effective_user else message.chat_id
+    if not ai_usage.take(user_id):
+        await message.reply_text(
+            f"На сегодня лимит общения с ИИ исчерпан: {AI_DAILY_LIMIT} сообщений в сутки. "
+            "Счётчик обнулится в полночь по Москве. Скачивание видео работает без ограничений.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
     history = context.user_data.get("chat_history", [])
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
 
     try:
         answer = await ask_ai(text, history)
     except httpx.HTTPStatusError as exc:
-        logger.exception("AI provider returned an HTTP error")
+        ai_usage.refund(user_id)
         status_code = exc.response.status_code
-        response_text = exc.response.text[:500]
+        logger.error("DeepSeek вернул %s: %s", status_code, exc.response.text[:500])
         if status_code == 401:
-            error_text = "Не получилось обратиться к AI: похоже, ключ провайдера недействителен или отозван."
-        elif status_code == 400 and "User location is not supported" in response_text:
-            error_text = (
-                "Чат через Gemini на этом VPS сейчас не работает: Google режет API по региону сервера. "
-                "Скачивание видео при этом должно работать. Чтобы вернуть чат, нужен другой AI-провайдер "
-                "или VPS в поддерживаемой стране."
-            )
+            error_text = "Чат временно недоступен: ключ ИИ недействителен. Администратор бота уже знает."
+        elif status_code == 402:
+            # Insufficient Balance — на счёте DeepSeek кончились деньги
+            logger.error("На балансе DeepSeek закончились средства — пополните счёт на platform.deepseek.com")
+            error_text = "Чат временно недоступен: у бота закончился баланс ИИ. Скачивание видео работает."
         elif status_code == 429:
-            error_text = "Сервис AI сейчас уперся в лимиты. Попробуй еще раз чуть позже."
+            error_text = "ИИ сейчас перегружен. Попробуй ещё раз через минуту."
+        elif status_code >= 500:
+            error_text = "У ИИ-сервиса временный сбой. Попробуй ещё раз чуть позже."
         else:
-            error_text = f"Сервис AI вернул ошибку {status_code}. Нажми «Перезапустить» и попробуй еще раз."
+            error_text = f"ИИ вернул ошибку {status_code}. Нажми «Перезапустить» и попробуй ещё раз."
 
         await message.reply_text(error_text, reply_markup=MAIN_KEYBOARD)
         return
     except httpx.TimeoutException:
-        logger.exception("AI request timed out")
+        ai_usage.refund(user_id)
+        logger.warning("Запрос к DeepSeek не уложился в %s с", AI_TIMEOUT_SECONDS)
         await message.reply_text(
-            "AI отвечает слишком долго. Нажми «Перезапустить» и попробуй еще раз через минуту.",
+            "ИИ отвечает слишком долго. Попробуй ещё раз через минуту.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+    except httpx.TransportError as exc:
+        ai_usage.refund(user_id)
+        logger.warning("Нет связи с DeepSeek: %r", exc)
+        await message.reply_text(
+            "Не получилось связаться с ИИ. Попробуй ещё раз через минуту.",
             reply_markup=MAIN_KEYBOARD,
         )
         return
     except AIConfigError as exc:
+        ai_usage.refund(user_id)
         # Не пишем traceback: это не сбой, а незаполненный .env, и совет
         # «нажми Перезапустить» тут только сбивает с толку — не поможет.
         logger.error("Чат недоступен, провайдер ИИ не настроен: %s", exc)
@@ -690,6 +737,7 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         )
         return
     except Exception:
+        ai_usage.refund(user_id)
         logger.exception("Unexpected chat error")
         await message.reply_text(
             "Не получилось ответить сейчас. Нажми «Перезапустить» и попробуй еще раз.",
@@ -698,6 +746,7 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         return
 
     if not answer:
+        ai_usage.refund(user_id)
         await message.reply_text(
             "ИИ вернул пустой ответ. Попробуй переформулировать вопрос.",
             reply_markup=MAIN_KEYBOARD,
@@ -710,7 +759,14 @@ async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         {"role": "assistant", "content": answer},
     ]
     context.user_data["chat_history"] = trim_history(new_history)
-    await message.reply_text(answer[:4096], reply_markup=MAIN_KEYBOARD)
+
+    if ai_usage.is_limited(user_id):
+        left = ai_usage.remaining(user_id)
+        if left <= 2:
+            answer += f"\n\n(Осталось сообщений ИИ на сегодня: {left})"
+
+    for chunk in split_text(answer):
+        await message.reply_text(chunk, reply_markup=MAIN_KEYBOARD)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -762,11 +818,18 @@ def main() -> None:
     except AIConfigError as exc:
         logger.warning(
             "Chat is disabled: %s Downloads will still work. "
-            "Fill in one AI provider in .env and restart.",
+            "Put DEEPSEEK_API_KEY into .env and restart.",
             exc,
         )
     else:
-        logger.info("AI provider: %s, model %s", ai_config.provider, ai_config.model)
+        logger.info(
+            "AI provider: %s, model %s, thinking %s, daily limit %s per user (admins: %s)",
+            ai_config.provider,
+            ai_config.model,
+            DEEPSEEK_THINKING,
+            AI_DAILY_LIMIT or "off",
+            len(ADMIN_USER_IDS),
+        )
 
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     cleanup_stale_downloads()
