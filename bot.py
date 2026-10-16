@@ -54,6 +54,9 @@ ADMIN_USER_IDS = {
     int(item) for item in re.split(r"[,\s]+", os.getenv("ADMIN_USER_IDS", "")) if item.strip().isdigit()
 }
 MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "49"))
+# Прокси только для TikTok, например socks5://user:pass@host:1080 — он
+# блокирует российские адреса. Пусто — качать напрямую.
+TIKTOK_PROXY = os.getenv("TIKTOK_PROXY", "").strip()
 CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "10"))
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "60"))
@@ -175,12 +178,27 @@ def resolve_cookiefile() -> Optional[Path]:
     return None
 
 
-def build_ydl_opts(skip_download: bool = False, outtmpl: Optional[str] = None) -> dict:
+def is_tiktok(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
+
+
+def build_ydl_opts(url: str, skip_download: bool = False, outtmpl: Optional[str] = None) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "windowsfilenames": True,
         "restrictfilenames": True,
+        "noplaylist": True,
+        # Готовый mp4 со звуком, а если его нет (YouTube без JS-движка отдаёт
+        # только раздельные потоки) — видео и звук по отдельности со склейкой
+        # через ffmpeg. Формат задаём и для пробы, иначе оценка размера
+        # считалась бы по другому файлу, чем тот, что потом скачивается.
+        "format": "b[ext=mp4]/bv*[ext=mp4]+ba[ext=m4a]/b/bv*+ba",
+        "merge_output_format": "mp4",
+        # Только IPv4: IPv6 с российского хостинга не отвечает, а curl_cffi
+        # разрешает имена сам, мимо подмены из net_patch, и висит до таймаута
+        "source_address": "0.0.0.0",
     }
 
     if skip_download:
@@ -188,8 +206,11 @@ def build_ydl_opts(skip_download: bool = False, outtmpl: Optional[str] = None) -
 
     if outtmpl:
         opts["outtmpl"] = outtmpl
-        opts["format"] = "best[ext=mp4]/best"
-        opts["noplaylist"] = True
+
+    # TikTok не отдаёт ролики на российские адреса, куки тут не помогают —
+    # нужен выход в интернет из другой страны
+    if TIKTOK_PROXY and is_tiktok(url):
+        opts["proxy"] = TIKTOK_PROXY
 
     cookiefile = resolve_cookiefile()
     if cookiefile is not None:
@@ -554,32 +575,36 @@ async def post_init(application: Application) -> None:
 
 
 def probe_video(url: str) -> dict:
-    opts = build_ydl_opts(skip_download=True)
+    opts = build_ydl_opts(url, skip_download=True)
     with YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
 
-def choose_estimated_size(info: dict) -> Optional[int]:
-    candidates = [
-        info.get("filesize"),
-        info.get("filesize_approx"),
-    ]
-
-    requested = info.get("requested_formats") or []
-    for item in requested:
-        candidates.append(item.get("filesize"))
-        candidates.append(item.get("filesize_approx"))
-
-    for candidate in candidates:
+def _size_of(item: dict) -> Optional[int]:
+    for candidate in (item.get("filesize"), item.get("filesize_approx")):
         # yt-dlp может вернуть размер как float (filesize_approx), учитываем оба типа
         if isinstance(candidate, (int, float)) and candidate > 0:
             return int(candidate)
     return None
 
 
+def choose_estimated_size(info: dict) -> Optional[int]:
+    size = _size_of(info)
+    if size:
+        return size
+
+    # Видео и звук качаются по отдельности: итоговый файл — их сумма,
+    # а не размер одной лишь видеодорожки
+    requested = info.get("requested_formats") or []
+    sizes = [_size_of(item) for item in requested]
+    if sizes and all(sizes):
+        return sum(sizes)
+    return None
+
+
 def download_video(url: str, job_dir: Path) -> Path:
     job_dir.mkdir(parents=True, exist_ok=True)
-    opts = build_ydl_opts(outtmpl=build_output_template(job_dir))
+    opts = build_ydl_opts(url, outtmpl=build_output_template(job_dir))
 
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -740,7 +765,19 @@ async def handle_download(
             except DownloadError as exc:
                 logger.exception("Download failed for url=%s", url)
                 details = str(exc)
-                if "Unexpected response from webpage request" in details:
+                if "IP address is blocked" in details:
+                    # TikTok не показывает ролики российским адресам. Лечится
+                    # только прокси из другой страны (TIKTOK_PROXY), не куками.
+                    logger.warning(
+                        "TikTok blocks the host IP for url=%s. Set TIKTOK_PROXY to a proxy outside Russia.",
+                        url,
+                    )
+                    text = (
+                        "TikTok не отдаёт это видео серверу бота — площадка блокирует его адрес. "
+                        "Ссылка тут ни при чём. Администратор бота уже знает, попробуй позже "
+                        "или пришли ссылку на YouTube или Instagram."
+                    )
+                elif "Unexpected response from webpage request" in details:
                     # Площадка отдала 200, но вместо страницы видео — заслон
                     # антибота (у TikTok это SlardarWAF, признак x-tt-system-error).
                     # Версия yt-dlp тут ни при чём, лечится файлом cookies.
