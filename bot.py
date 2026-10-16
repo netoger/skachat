@@ -187,6 +187,8 @@ def build_ydl_opts(url: str, skip_download: bool = False, outtmpl: Optional[str]
     opts = {
         "quiet": True,
         "no_warnings": True,
+        # Строка прогресса иначе пишется в bot.log при каждом скачивании
+        "noprogress": True,
         "windowsfilenames": True,
         "restrictfilenames": True,
         "noplaylist": True,
