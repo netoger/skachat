@@ -58,9 +58,16 @@ CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "10"))
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "60"))
 
-# Channel-subscription gate. Leave REQUIRED_CHANNEL empty to disable the gate entirely.
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
-REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "").strip()
+# Обязательная подписка. Каналы перечисляются в REQUIRED_CHANNELS через
+# запятую; пустое значение выключает проверку. Старая пара REQUIRED_CHANNEL
+# и REQUIRED_CHANNEL_URL по-прежнему понимается — разбор см. в parse_channels().
+REQUIRED_CHANNELS_RAW = os.getenv("REQUIRED_CHANNELS", "").strip()
+if not REQUIRED_CHANNELS_RAW and os.getenv("REQUIRED_CHANNEL", "").strip():
+    REQUIRED_CHANNELS_RAW = "|".join(
+        part
+        for part in (os.getenv("REQUIRED_CHANNEL", "").strip(), os.getenv("REQUIRED_CHANNEL_URL", "").strip())
+        if part
+    )
 SUBSCRIPTION_CACHE_SECONDS = int(os.getenv("SUBSCRIPTION_CACHE_SECONDS", "300"))
 
 # Concurrency / reliability knobs.
@@ -352,17 +359,66 @@ async def safe_delete_message(message) -> None:
         logger.exception("Failed to delete message")
 
 
-def build_subscription_keyboard() -> InlineKeyboardMarkup:
-    buttons = []
-    if REQUIRED_CHANNEL_URL:
-        buttons.append([InlineKeyboardButton("📢 Открыть канал", url=REQUIRED_CHANNEL_URL)])
+class Channel(NamedTuple):
+    chat_id: str  # @username или числовой id вида -100…
+    url: str      # куда ведёт кнопка «Подписаться»
+    label: str    # подпись на кнопке
+
+
+def parse_channels(raw: str) -> list[Channel]:
+    """Разобрать REQUIRED_CHANNELS.
+
+    Каналы перечисляются через запятую, точку с запятой или с новой строки.
+    Каждый можно записать так:
+      https://t.me/name  или  t.me/name  или  @name   — публичный канал;
+      -1001234567890|https://t.me/+ссылка             — закрытый канал:
+                                                         id и пригласительная ссылка.
+    """
+    channels: list[Channel] = []
+    seen: set[str] = set()
+    for item in re.split(r"[,;\n]+", raw):
+        item = item.strip()
+        if not item:
+            continue
+        chat_part, _, url = (part.strip() for part in item.partition("|"))
+        match = re.fullmatch(r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{4,})/?", chat_part)
+        if match:
+            chat_id = "@" + match.group(1)
+        elif re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]{3,}", chat_part):
+            chat_id = "@" + chat_part.lstrip("@")
+        elif re.fullmatch(r"-100\d+", chat_part):
+            chat_id = chat_part
+        else:
+            logger.error("REQUIRED_CHANNELS: не понял запись %r — канал пропущен", item)
+            continue
+        if chat_id.lower() in seen:
+            continue
+        seen.add(chat_id.lower())
+        if not url and chat_id.startswith("@"):
+            url = f"https://t.me/{chat_id[1:]}"
+        if not url:
+            logger.error("REQUIRED_CHANNELS: у закрытого канала %s нет ссылки после «|»", chat_id)
+        label = chat_id if chat_id.startswith("@") else f"канал {len(channels) + 1}"
+        channels.append(Channel(chat_id, url, label))
+    return channels
+
+
+REQUIRED_CHANNELS = parse_channels(REQUIRED_CHANNELS_RAW)
+
+
+def build_subscription_keyboard(channels: list[Channel]) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(f"📢 Подписаться: {channel.label}", url=channel.url)]
+        for channel in channels
+        if channel.url
+    ]
     buttons.append([InlineKeyboardButton("✅ Я подписался", callback_data=VERIFY_SUBSCRIPTION_CALLBACK)])
     return InlineKeyboardMarkup(buttons)
 
 
-async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, channel: Channel, user_id: int) -> bool:
     try:
-        member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        member = await context.bot.get_chat_member(chat_id=channel.chat_id, user_id=user_id)
     except BadRequest as exc:
         # Telegram не даёт смотреть подписчиков: бот не админ канала или имя
         # канала неверное. Закрыть бота для всех из-за ошибки настройки хуже,
@@ -372,13 +428,13 @@ async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
         logger.error(
             "Не удалось проверить подписку на %s (%s) — пропускаем без проверки. "
             "Сделайте бота администратором канала.",
-            REQUIRED_CHANNEL,
+            channel.chat_id,
             exc,
         )
         return True
     except Exception:
         # Сетевой сбой: не отказываем подписчику из-за моргнувшей связи
-        logger.exception("Subscription check failed for user_id=%s", user_id)
+        logger.exception("Subscription check failed for %s, user_id=%s", channel.chat_id, user_id)
         return True
     if member.status in ("member", "administrator", "creator"):
         return True
@@ -386,8 +442,26 @@ async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
     return member.status == "restricted" and bool(getattr(member, "is_member", False))
 
 
+async def missing_channels(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list[Channel]:
+    """Каналы, на которые пользователь не подписан. Проверяем все разом, а не по очереди."""
+    results = await asyncio.gather(
+        *(is_channel_member(context, channel, user_id) for channel in REQUIRED_CHANNELS)
+    )
+    missing = [channel for channel, ok in zip(REQUIRED_CHANNELS, results) if not ok]
+    context.user_data["sub_verified"] = not missing
+    context.user_data["sub_verified_until"] = time.time() + SUBSCRIPTION_CACHE_SECONDS
+    return missing
+
+
+def subscription_prompt(missing: list[Channel]) -> str:
+    if len(REQUIRED_CHANNELS) == 1:
+        return "Чтобы пользоваться ботом, подпишись на канал и нажми «Я подписался»."
+    names = ", ".join(channel.label for channel in missing)
+    return f"Чтобы пользоваться ботом, подпишись на каналы ({names}) и нажми «Я подписался»."
+
+
 async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not REQUIRED_CHANNEL:
+    if not REQUIRED_CHANNELS:
         return True
 
     user = update.effective_user
@@ -401,16 +475,14 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if context.user_data.get("sub_verified") and time.time() < context.user_data.get("sub_verified_until", 0):
         return True
 
-    subscribed = await is_channel_member(context, user.id)
-    context.user_data["sub_verified"] = subscribed
-    context.user_data["sub_verified_until"] = time.time() + SUBSCRIPTION_CACHE_SECONDS
-
-    if not subscribed:
+    missing = await missing_channels(context, user.id)
+    if missing:
+        # Кнопки только для тех каналов, где подписки ещё нет
         await message.reply_text(
-            "Чтобы пользоваться ботом, подпишись на канал и нажми «Я подписался».",
-            reply_markup=build_subscription_keyboard(),
+            subscription_prompt(missing),
+            reply_markup=build_subscription_keyboard(missing),
         )
-    return subscribed
+    return not missing
 
 
 async def handle_subscription_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,11 +490,9 @@ async def handle_subscription_check(update: Update, context: ContextTypes.DEFAUL
     if not query or not query.from_user:
         return
 
-    subscribed = await is_channel_member(context, query.from_user.id)
-    context.user_data["sub_verified"] = subscribed
-    context.user_data["sub_verified_until"] = time.time() + SUBSCRIPTION_CACHE_SECONDS
+    missing = await missing_channels(context, query.from_user.id)
 
-    if subscribed:
+    if not missing:
         await query.answer("Подписка подтверждена!")
         try:
             await query.edit_message_text("Спасибо за подписку! Бот доступен.")
@@ -434,11 +504,18 @@ async def handle_subscription_check(update: Update, context: ContextTypes.DEFAUL
                 "Если пришлешь обычный текст, я просто отвечу как собеседник.",
                 reply_markup=MAIN_KEYBOARD,
             )
-    else:
-        await query.answer(
-            "Подписка не найдена. Подпишись на канал и попробуй еще раз.",
-            show_alert=True,
+        return
+
+    names = ", ".join(channel.label for channel in missing)
+    await query.answer(f"Нет подписки: {names}. Подпишись и попробуй еще раз.", show_alert=True)
+    try:
+        # Обновляем кнопки: оставляем только каналы, где подписки всё ещё нет
+        await query.edit_message_text(
+            subscription_prompt(missing), reply_markup=build_subscription_keyboard(missing)
         )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.exception("Failed to update subscription prompt message")
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -454,25 +531,26 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(application: Application) -> None:
-    if not REQUIRED_CHANNEL:
-        return
-
-    try:
-        me = await application.bot.get_chat_member(REQUIRED_CHANNEL, application.bot.id)
-        if me.status not in ("administrator", "creator"):
-            logger.warning(
-                "Bot is not an administrator of %s — subscription checks will always fail. "
-                "Add the bot as an administrator of the channel.",
-                REQUIRED_CHANNEL,
+    for channel in REQUIRED_CHANNELS:
+        try:
+            me = await application.bot.get_chat_member(channel.chat_id, application.bot.id)
+        except Exception as exc:
+            logger.error(
+                "Канал %s: не удалось проверить права бота (%s). Проверьте запись в "
+                "REQUIRED_CHANNELS и что бот добавлен в канал администратором — до тех пор "
+                "подписка на этот канал не проверяется.",
+                channel.chat_id,
+                exc,
             )
+            continue
+        if me.status in ("administrator", "creator"):
+            logger.info("Subscription gate active for channel %s", channel.chat_id)
         else:
-            logger.info("Subscription gate active for channel %s", REQUIRED_CHANNEL)
-    except Exception:
-        logger.exception(
-            "Could not verify bot membership in %s. Make sure REQUIRED_CHANNEL is correct "
-            "and the bot is added as an administrator of the channel.",
-            REQUIRED_CHANNEL,
-        )
+            logger.error(
+                "Бот не администратор канала %s — подписка на него не проверяется. "
+                "Добавьте бота в администраторы канала.",
+                channel.chat_id,
+            )
 
 
 def probe_video(url: str) -> dict:
@@ -839,10 +917,8 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and configure it.")
 
-    if REQUIRED_CHANNEL and not REQUIRED_CHANNEL_URL:
-        logger.warning(
-            "REQUIRED_CHANNEL is set but REQUIRED_CHANNEL_URL is empty — the subscribe button will have no link."
-        )
+    if REQUIRED_CHANNELS:
+        logger.info("Required channels: %s", ", ".join(channel.chat_id for channel in REQUIRED_CHANNELS))
 
     try:
         ai_config = resolve_ai_config()

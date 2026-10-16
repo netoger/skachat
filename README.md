@@ -82,21 +82,27 @@ never prints the key itself.
 
 ## Subscription gate
 
-If `REQUIRED_CHANNEL` is set, the bot only replies to users who are subscribed to that
-channel. Before it works:
+If `REQUIRED_CHANNELS` is set, the bot only replies to users who are subscribed to
+**every** channel in the list. Channels are separated by commas; to add or remove one,
+edit the line and restart the bot:
 
-1. Add the bot as an **administrator** of the channel (any admin right is enough — bots
-   cannot be plain members of channels, only admins, and `getChatMember` requires that).
-2. Set `REQUIRED_CHANNEL` to the channel's `@username` and `REQUIRED_CHANNEL_URL` to its
-   public link, so the "Open channel" button works.
+```bash
+REQUIRED_CHANNELS=https://t.me/kursoviework, https://t.me/siskysindnysuiny
+```
 
-On startup the bot checks its own admin status in the channel and logs a warning if it
-isn't an admin. If Telegram refuses the membership check (bot is not an admin, wrong
-channel name) or the network fails, the bot lets the user through and logs an error
-rather than locking everyone out. Users from `ADMIN_USER_IDS` skip the gate, and `/id`
-works without it so anyone can look up their Telegram ID.
-Verification results are cached per user for `SUBSCRIPTION_CACHE_SECONDS` to avoid hitting
-Telegram's API on every message. Leave `REQUIRED_CHANNEL` empty to disable the gate.
+Each entry can be `https://t.me/name`, `t.me/name` or `@name`. A private channel is
+written as its numeric id and invite link: `-1001234567890|https://t.me/+invite`.
+Leave the value empty to disable the gate. The old `REQUIRED_CHANNEL` /
+`REQUIRED_CHANNEL_URL` pair still works when `REQUIRED_CHANNELS` is not set.
+
+The bot must be an **administrator** of every channel (any admin right is enough —
+`getChatMember` requires it). On startup it checks this and logs an error per channel
+it cannot check. A user who is missing some subscriptions gets buttons only for those
+channels. If Telegram refuses the check for a channel (bot is not an admin, wrong name)
+or the network fails, that channel is skipped and an error is logged rather than locking
+everyone out. Users from `ADMIN_USER_IDS` skip the gate, and `/id` works without it so
+anyone can look up their Telegram ID.
+Verification results are cached per user for `SUBSCRIPTION_CACHE_SECONDS`.
 
 ## Reliability controls
 
