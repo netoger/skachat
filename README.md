@@ -91,7 +91,10 @@ channel. Before it works:
    public link, so the "Open channel" button works.
 
 On startup the bot checks its own admin status in the channel and logs a warning if it
-isn't an admin — check `docker logs` if subscribers report the gate never passes.
+isn't an admin. If Telegram refuses the membership check (bot is not an admin, wrong
+channel name) or the network fails, the bot lets the user through and logs an error
+rather than locking everyone out. Users from `ADMIN_USER_IDS` skip the gate, and `/id`
+works without it so anyone can look up their Telegram ID.
 Verification results are cached per user for `SUBSCRIPTION_CACHE_SECONDS` to avoid hitting
 Telegram's API on every message. Leave `REQUIRED_CHANNEL` empty to disable the gate.
 

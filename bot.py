@@ -363,10 +363,27 @@ def build_subscription_keyboard() -> InlineKeyboardMarkup:
 async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
         member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+    except BadRequest as exc:
+        # Telegram не даёт смотреть подписчиков: бот не админ канала или имя
+        # канала неверное. Закрыть бота для всех из-за ошибки настройки хуже,
+        # чем временно пропустить без проверки, — поэтому пускаем и шумим в журнал.
+        if "user not found" in str(exc).lower():
+            return False
+        logger.error(
+            "Не удалось проверить подписку на %s (%s) — пропускаем без проверки. "
+            "Сделайте бота администратором канала.",
+            REQUIRED_CHANNEL,
+            exc,
+        )
+        return True
     except Exception:
+        # Сетевой сбой: не отказываем подписчику из-за моргнувшей связи
         logger.exception("Subscription check failed for user_id=%s", user_id)
-        return False
-    return member.status in ("member", "administrator", "creator")
+        return True
+    if member.status in ("member", "administrator", "creator"):
+        return True
+    # Подписчик с ограничениями в канале — всё равно подписчик
+    return member.status == "restricted" and bool(getattr(member, "is_member", False))
 
 
 async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -377,6 +394,9 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     message = update.effective_message
     if not user or not message:
         return False
+
+    if user.id in ADMIN_USER_IDS:
+        return True
 
     if context.user_data.get("sub_verified") and time.time() < context.user_data.get("sub_verified_until", 0):
         return True
@@ -548,6 +568,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Кнопка «{RESTART_BUTTON_TEXT}» сбрасывает только твой диалог.",
         reply_markup=MAIN_KEYBOARD,
     )
+
+
+async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Подсказать свой Telegram ID — он нужен для ADMIN_USER_IDS. Без проверки подписки."""
+    if not update.message or not update.effective_user:
+        return
+    user_id = update.effective_user.id
+    text = f"Твой Telegram ID: {user_id}"
+    if user_id in ADMIN_USER_IDS:
+        text += "\nТы в списке администраторов: лимит ИИ на тебя не действует."
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 async def reset_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -843,6 +874,7 @@ def main() -> None:
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_dialog))
+    application.add_handler(CommandHandler("id", show_id))
     application.add_handler(
         CallbackQueryHandler(handle_subscription_check, pattern=f"^{VERIFY_SUBSCRIPTION_CALLBACK}$")
     )
