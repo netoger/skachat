@@ -48,7 +48,7 @@ MAX_DOWNLOAD_MB=49
 CLEANUP_MAX_AGE_HOURS=24
 REQUIRED_CHANNEL=
 REQUIRED_CHANNEL_URL=
-SUBSCRIPTION_CACHE_SECONDS=300
+SUBSCRIPTION_CACHE_SECONDS=0
 CONCURRENT_UPDATES=8
 MAX_CONCURRENT_DOWNLOADS=3
 ```
@@ -64,7 +64,8 @@ Create a key at platform.deepseek.com, top up the balance, and put the key into
 - `DEEPSEEK_THINKING` — `disabled` by default. Thinking mode is slower and
   bills the reasoning tokens, which a chat bot does not need.
 - `AI_DAILY_LIMIT` — messages per user per day (Moscow time), `10` by default,
-  `0` disables the limit. Counters live in `data/ai_usage.json` and survive
+  `0` disables the limit. CGI counters live in `data/users/USER_ID.usage.json`
+  (polling uses `data/ai_usage.json`) and survive
   restarts. A failed request does not count.
 - `ADMIN_USER_IDS` — comma-separated Telegram user IDs without the limit.
 - `AI_MAX_TOKENS` — cap on the answer length.
@@ -99,12 +100,21 @@ The bot must be an **administrator** of every channel (any admin right is enough
 `getChatMember` requires it). On startup it checks this and logs an error per channel
 it cannot check. A user who is missing some subscriptions gets buttons only for those
 channels. If Telegram refuses the check for a channel (bot is not an admin, wrong name)
-or the network fails, that channel is skipped and an error is logged rather than locking
-everyone out. Users from `ADMIN_USER_IDS` skip the gate, and `/id` works without it so
-anyone can look up their Telegram ID.
-Verification results are cached per user for `SUBSCRIPTION_CACHE_SECONDS`.
+or the network fails, access stays closed until both subscriptions are confirmed.
+This applies to administrators too; `ADMIN_USER_IDS` only removes the AI quota.
+`/id` remains available to look up one's Telegram ID. By default verification runs
+on every request (`SUBSCRIPTION_CACHE_SECONDS=0`); no old positive cache is used.
 
 ## Reliability controls
+
+On Timeweb CGI, Telegram sends up to three requests concurrently. Each user has
+an independent lock, history and quota file. A slow download does not hold other
+users' state. Filesystem slots limit downloads across all CGI processes to
+`MAX_CONCURRENT_DOWNLOADS`. Old dialogs and quota counts migrate automatically
+from the previous files; keep those old files for users who have not returned yet.
+During link resolution and download, one status message cycles through
+`Загрузка`, `Загрузка.`, `Загрузка..`, `Загрузка...`, then back. The animation
+stops before the final result or error; upload uses `Отправляю видео…`.
 
 - `CONCURRENT_UPDATES` lets the bot process multiple users' messages in parallel instead of
   queuing everyone behind one slow request (download or AI call).

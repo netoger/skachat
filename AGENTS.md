@@ -26,13 +26,27 @@ timeweb-public/webhook.py и .htaccess; backend, .env и data остаются �
 configure_webhook.py без --apply только проверяет HTTPS; --apply меняет webhook
 и создаёт секрет в серверном .env. Не применять до проверки сайта и остановки
 прежнего polling. Тесты: .venv/Scripts/python.exe -m unittest
-test_external_download test_webhook_cgi. Четырнадцать тестов проходят локально
-и на сервере. Публичный CGI и TLS проверены, служебные пути возвращают 403.
+test_external_download test_webhook_cgi test_bot_behavior. 24 теста проходят
+на Linux-сервере, на Windows два Linux-теста пропускаются.
+Публичный CGI и TLS проверены, служебные пути возвращают 403.
 По getWebhookInfo очередь пуста, последней ошибки нет. Пользовательская
 отправка видео через новый webhook ещё требует проверки в Telegram.
 Сервер развёрнут из ветки codex/timeweb-webhook; обновлять явной командой
 git pull --ff-only origin codex/timeweb-webhook после сверки git status.
 skachatctl.sh блокирует start/restart/update, ensure ничего не запускает.
+
+Webhook: max_connections=3; состояние и квоты раздельны по пользователям
+в data/users/ID.pickle и ID.usage.json. Перенос из webhook_state.pickle и
+ai_usage.json автоматический при первом запросе; старые файлы не удалять.
+Блокировки пользователей независимы, слоты скачивания общие (по умолчанию 3).
+Проверка через публичный CGI: при занятом пользователе другой обработан за
+1,35 с (HTTP 200), тот же получает 503 для повторной доставки Telegram.
+Анимация «Загрузка…» действует при проверке ссылки и скачивании, интервал 2 с;
+перед загрузкой в Telegram меняется на «Отправляю видео…».
+REQUIRED_CHANNELS: @kursoviework и @siskysindnysuiny, бот — администратор обоих.
+SUBSCRIPTION_CACHE_SECONDS=0 на сервере; при ошибке проверки доступ закрыт,
+администраторы пользователя тоже обязаны подписаться. /id остаётся доступен.
+data/webhook_errors.log содержит только типы исключений и длительность.
 
 Перед изменениями читать: README-server.md, README.md.
 
