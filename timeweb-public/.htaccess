@@ -1,6 +1,9 @@
 Options -Indexes +ExecCGI
 AddHandler cgi-script .py
 
+RewriteEngine On
+RewriteRule ^app(?:/|$) - [F,L]
+
 <FilesMatch "^(?!webhook\.py$)">
     Require all denied
 </FilesMatch>

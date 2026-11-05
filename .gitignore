@@ -12,5 +12,7 @@ system_prompt.txt
 .venv/
 data/
 Temp/
+# HTTP-защита корня закрытого runtime-worktree создаётся при выкладке.
+/.htaccess
 # Любые файлы кук — секретные сессии, никогда не коммитить
 *cookies*.txt
