@@ -16,14 +16,23 @@ Telegram-бот скачивания видео и ИИ-чата. Не запу�
 VPS 109.122.194.113 не считать действующей площадкой этого бота без проверки.
 Для skachat выбран дальнейший разбор размещения на Timeweb. Код бота уже
 обнаружен в ~/skachat на cc250576@vh470.timeweb.ru. Тариф и отдельный HTTPS-адрес
-для webhook ещё уточняются; перевод на webhook пока не выполнен.
+для webhook подтверждены: домен togeer.tw1.ru, отдельный webroot
+/home/c/cc250576/togeeer/public_html (в имени каталога три e).
+Webhook зарегистрирован 06.11.2026 на https://togeer.tw1.ru/webhook.py.
+Прежний polling остановлен, BOT_MODE=webhook в серверном .env.
 
 Подготовленный CGI-вариант описан в README-webhook.md. Публичны только
 timeweb-public/webhook.py и .htaccess; backend, .env и data остаются вне webroot.
 configure_webhook.py без --apply только проверяет HTTPS; --apply меняет webhook
 и создаёт секрет в серверном .env. Не применять до проверки сайта и остановки
 прежнего polling. Тесты: .venv/Scripts/python.exe -m unittest
-test_external_download test_webhook_cgi. Публичный CGI ещё не проверен.
+test_external_download test_webhook_cgi. Десять тестов проходят локально
+и на сервере. Публичный CGI и TLS проверены, служебные пути возвращают 403.
+По getWebhookInfo очередь пуста, последней ошибки нет. Пользовательская
+отправка видео через новый webhook ещё требует проверки в Telegram.
+Сервер развёрнут из ветки codex/timeweb-webhook; обновлять явной командой
+git pull --ff-only origin codex/timeweb-webhook после сверки git status.
+skachatctl.sh блокирует start/restart/update, ensure ничего не запускает.
 
 Перед изменениями читать: README-server.md, README.md.
 
@@ -40,8 +49,8 @@ test_external_download test_webhook_cgi. Публичный CGI ещё не пр
 Проверки: `python -m unittest test_external_download`.
 Новый локальный модуль проверен разовым выполнением на Timeweb: получен
 полный MP4 2 823 850 байт, временный файл удалён. Для ssstik получение
-файла не подтверждено. Изменения на сервер не выложены; отправка нового
-пути через Telegram ещё не проверена.
+файла не подтверждено. Изменения выложены; отправка нового пути через
+Telegram ещё не проверена.
 SaveFrom и внешний загрузчик Instagram не подключены.
 Старые команды запуска демона в README-server.md противоречат глобальному
 запрету постоянных процессов на shared-хостинге; не выполнять их.

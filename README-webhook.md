@@ -1,9 +1,15 @@
 # Timeweb: webhook без постоянного процесса
 
-Состояние на 06.11.2026: код подготовлен, публичная выкладка и переключение
-не выполнены. Пока владелец создаёт отдельный сайт и технический домен.
-Остальные сайты не изменять. Старые start/restart/ensure из skachatctl.sh
-для shared-хостинга не использовать.
+Состояние на 06.11.2026: выполнена выкладка и зарегистрирован webhook
+https://togeer.tw1.ru/webhook.py. Webroot: /home/c/cc250576/togeeer/public_html.
+Backend: /home/c/cc250576/skachat, ветка codex/timeweb-webhook.
+Десять автономных тестов проходят локально и на сервере, CGI и TLS проверены,
+служебные пути закрыты HTTP 403. getWebhookInfo: pending=0, last_error отсутствует.
+Прежний polling остановлен, BOT_MODE=webhook установлен в серверном .env.
+Реальная отправка ролика пользователем через новый webhook ещё не проверена.
+Остальные сайты не изменять. start/restart/update в skachatctl.sh заблокированы,
+ensure ничего не запускает. Для обновления backend после сверки git status
+использовать git pull --ff-only origin codex/timeweb-webhook.
 
 ## Что нужно в панели
 
