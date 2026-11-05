@@ -18,7 +18,7 @@ class ServiceError(Exception):
 def service_client(referer='https://ssstik.io/ru'):
     # Личные cookies и настроенный для yt-dlp прокси сюда не передаются.
     return httpx.Client(timeout=15, trust_env=False,
-                        transport=httpx.HTTPTransport(local_address='0.0.0.0'), headers={
+                        transport=httpx.HTTPTransport(local_address='0.0.0.0', retries=2), headers={
         'User-Agent': 'Mozilla/5.0', 'Referer': referer,
     })
 
