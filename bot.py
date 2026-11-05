@@ -216,7 +216,11 @@ def build_ydl_opts(url: str, skip_download: bool = False, outtmpl: Optional[str]
     if TIKTOK_PROXY and is_tiktok(url):
         opts["proxy"] = TIKTOK_PROXY
 
-    cookiefile = resolve_cookiefile()
+    hostname = (urlparse(url).hostname or '').lower().rstrip('.')
+    # Публичные Reels запрашиваем без сессии: старые cookies переводят
+    # Instagram на ограниченный авторизованный API и вызывают HTTP 400.
+    instagram = hostname == 'instagram.com' or hostname.endswith('.instagram.com')
+    cookiefile = None if instagram else resolve_cookiefile()
     if cookiefile is not None:
         opts["cookiefile"] = str(cookiefile)
 
@@ -810,7 +814,7 @@ async def handle_download(
                     )
                 elif "Requested content is not available, rate-limit reached or login required" in details:
                     logger.warning(
-                        "Instagram requires login/cookies. Add instagram_cookies.txt and redeploy to fix."
+                        "Instagram ограничил анонимное скачивание; проверьте публичность ролика и версию yt-dlp."
                     )
                     text = (
                         "Instagram сейчас ограничивает доступ без логина. "

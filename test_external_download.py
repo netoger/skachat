@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,12 @@ from external_download import ServiceError, download_media, resolve_tiktok
 
 
 class ServiceTests(unittest.TestCase):
+    def test_public_reels_ignore_personal_cookies_but_youtube_keeps_support(self):
+        import bot
+        with patch.object(bot, 'resolve_cookiefile', return_value=Path('private-cookies.txt')):
+            self.assertNotIn('cookiefile', bot.build_ydl_opts('https://www.instagram.com/reel/test/'))
+            self.assertEqual(bot.build_ydl_opts('https://youtube.com/shorts/test')['cookiefile'], 'private-cookies.txt')
+
     @classmethod
     def setUpClass(cls):
         (Path(__file__).parent / 'Temp').mkdir(exist_ok=True)
