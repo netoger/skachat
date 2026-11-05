@@ -69,6 +69,7 @@ def main():
     if not config.get('WEBHOOK_SECRET'):
         set_key(env_path, 'WEBHOOK_SECRET', secret)
         env_path.chmod(0o600)
+    set_key(env_path, 'BOT_MODE', 'webhook')
     # Пустое служебное обновление проверяет backend без сообщения пользователю и ИИ.
     with httpx.Client(timeout=90, trust_env=False,
                       transport=httpx.HTTPTransport(local_address='0.0.0.0')) as client:

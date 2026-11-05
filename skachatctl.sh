@@ -9,6 +9,15 @@
 
 set -u
 
+# Этот скрипт предназначен для shared Timeweb, где демоны запрещены.
+case "${1:-status}" in
+  ensure) exit 0 ;;
+  start|restart|update)
+    echo "Постоянный процесс на shared-хостинге не запускается. См. README-webhook.md." >&2
+    exit 1
+    ;;
+esac
+
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PY="$APP_DIR/.venv/bin/python"
 ENTRY="$APP_DIR/run_bot.py"

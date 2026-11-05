@@ -5,10 +5,17 @@
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / '.env')
+if os.getenv('BOT_MODE', 'polling').strip().lower() == 'webhook':
+    # Старые задачи панели не должны поднимать polling после переключения.
+    raise SystemExit(0)
 
 # Формат совпадает с тем, что настраивает bot.py, поэтому его собственный
 # вызов basicConfig ничего не изменит, а сообщения о подборе адреса Telegram

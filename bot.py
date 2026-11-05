@@ -985,6 +985,9 @@ def build_application(persistence=None):
 
 
 def main() -> None:
+    if os.getenv('BOT_MODE', 'polling').strip().lower() == 'webhook':
+        logger.info('Polling отключён: обновления поступают через CGI webhook.')
+        return
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and configure it.")
 
