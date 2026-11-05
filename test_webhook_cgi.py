@@ -7,6 +7,7 @@ from unittest.mock import patch
 import httpx
 import os
 import asyncio
+from types import SimpleNamespace
 
 from webhook_cgi import RequestError, read_update
 
@@ -76,6 +77,22 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RequestTests(unittest.TestCase):
+    def test_error_diagnostic_does_not_store_exception_text(self):
+        import webhook_cgi
+        root = Path(__file__).parent / 'Temp'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as folder:
+            (Path(folder) / 'data').mkdir()
+            with patch.object(webhook_cgi, 'BASE_DIR', Path(folder)), \
+                    patch.object(webhook_cgi, 'handle_request', side_effect=RuntimeError('PRIVATE_CONTENT')), \
+                    patch('sys.stdin', SimpleNamespace(buffer=io.BytesIO())), \
+                    patch('sys.stdout', io.StringIO()) as output, patch('logging.exception'):
+                webhook_cgi.main()
+            log = (Path(folder) / 'data' / 'webhook_errors.log').read_text()
+            self.assertIn('RuntimeError', log)
+            self.assertNotIn('PRIVATE_CONTENT', log)
+            self.assertIn('503 Service Unavailable', output.getvalue())
+
     @unittest.skipUnless(os.name == 'posix', 'Файловые блокировки проверяются на Linux-сервере')
     def test_different_users_do_not_block_but_same_user_is_serialized(self):
         root = Path(__file__).parent / 'Temp'

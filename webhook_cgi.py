@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -154,12 +155,24 @@ def handle_request(environ, stream):
 def main():
     os.umask(0o077)
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+    started = time.monotonic()
     try:
         handle_request(os.environ, sys.stdin.buffer)
         status = 200
     except RequestError as exc:
         status = exc.status
-    except Exception:
+    except Exception as exc:
+        # Для диагностики достаточно типов ошибок и длительности:
+        # тексты сообщений, идентификаторы и секретные URL сюда не записываем.
+        types = []
+        cause = exc
+        while cause is not None and len(types) < 5:
+            types.append(type(cause).__name__)
+            cause = cause.__cause__
+        with suppress(OSError):
+            with (BASE_DIR / 'data' / 'webhook_errors.log').open('a') as output:
+                output.write(json.dumps({'error_types': types,
+                                         'seconds': round(time.monotonic() - started, 2)}) + '\n')
         logging.exception('Ошибка обработки webhook')
         status = 503
     reasons = {200: 'OK', 400: 'Bad Request', 403: 'Forbidden', 405: 'Method Not Allowed',

@@ -23,6 +23,7 @@ from telegram import (
 )
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, NetworkError
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1033,7 +1034,12 @@ def build_application(persistence=None):
     builder = (Application.builder().token(BOT_TOKEN)
                .concurrent_updates(CONCURRENT_UPDATES).post_init(post_init))
     if persistence is not None:
-        builder = builder.persistence(persistence).updater(None)
+        # На хостинге бывают краткие таймауты TLS; стандартный транспорт
+        # Telegram не повторяет соединение и роняет целый CGI-запрос.
+        request = HTTPXRequest(connect_timeout=8, read_timeout=30,
+                               httpx_kwargs={'transport': httpx.AsyncHTTPTransport(
+                                   local_address='0.0.0.0', retries=2)})
+        builder = builder.persistence(persistence).updater(None).request(request)
     application = builder.build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_dialog))
