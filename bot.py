@@ -32,7 +32,7 @@ from telegram.ext import (
 )
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
-from external_download import ServiceError, download_media, resolve_tiktok, service_client
+from external_download import ServiceError, download_media, resolve_tiktok, resolve_instagram, service_client
 
 
 load_dotenv()
@@ -185,6 +185,11 @@ def is_tiktok(url: str) -> bool:
     return hostname == "tiktok.com" or hostname.endswith(".tiktok.com")
 
 
+def is_instagram(url: str) -> bool:
+    hostname = (urlparse(url).hostname or '').lower().rstrip('.')
+    return hostname == 'instagram.com' or hostname.endswith('.instagram.com')
+
+
 def build_ydl_opts(url: str, skip_download: bool = False, outtmpl: Optional[str] = None) -> dict:
     opts = {
         "quiet": True,
@@ -216,11 +221,9 @@ def build_ydl_opts(url: str, skip_download: bool = False, outtmpl: Optional[str]
     if TIKTOK_PROXY and is_tiktok(url):
         opts["proxy"] = TIKTOK_PROXY
 
-    hostname = (urlparse(url).hostname or '').lower().rstrip('.')
     # Публичные Reels запрашиваем без сессии: старые cookies переводят
     # Instagram на ограниченный авторизованный API и вызывают HTTP 400.
-    instagram = hostname == 'instagram.com' or hostname.endswith('.instagram.com')
-    cookiefile = None if instagram else resolve_cookiefile()
+    cookiefile = None if is_instagram(url) else resolve_cookiefile()
     if cookiefile is not None:
         opts["cookiefile"] = str(cookiefile)
 
@@ -583,6 +586,10 @@ async def post_init(application: Application) -> None:
 
 
 def probe_video(url: str) -> dict:
+    if is_instagram(url):
+        with service_client('https://www.instagram.com/') as client:
+            media_url = resolve_instagram(url, client)
+        return {'title': 'Instagram Reels', '_service_media_url': media_url}
     if is_tiktok(url) and TIKTOK_DOWNLOADER in ('tikwm', 'ssstik'):
         with service_client() as client:
             media_url = resolve_tiktok(url, client, TIKTOK_DOWNLOADER)
@@ -616,10 +623,11 @@ def choose_estimated_size(info: dict) -> Optional[int]:
 
 def download_video(url: str, job_dir: Path, info: Optional[dict] = None) -> Path:
     job_dir.mkdir(parents=True, exist_ok=True)
-    if is_tiktok(url) and TIKTOK_DOWNLOADER in ('tikwm', 'ssstik'):
+    if is_instagram(url) or (is_tiktok(url) and TIKTOK_DOWNLOADER in ('tikwm', 'ssstik')):
         media_url = (info or probe_video(url))['_service_media_url']
-        path = job_dir / 'tiktok.mp4'
-        with service_client() as client:
+        path = job_dir / ('instagram.mp4' if is_instagram(url) else 'tiktok.mp4')
+        referer = 'https://www.instagram.com/' if is_instagram(url) else 'https://ssstik.io/ru'
+        with service_client(referer) as client:
             download_media(media_url, path, MAX_FILE_SIZE, client)
         return path
     opts = build_ydl_opts(url, outtmpl=build_output_template(job_dir))

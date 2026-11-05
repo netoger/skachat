@@ -1,7 +1,9 @@
-"""Скачивание публичных TikTok через внешние сервисы без личных cookies."""
+"""Скачивание публичных TikTok и Reels без личных cookies."""
 
 import re
+import json
 import time
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,11 +15,11 @@ class ServiceError(Exception):
     pass
 
 
-def service_client():
+def service_client(referer='https://ssstik.io/ru'):
     # Личные cookies и настроенный для yt-dlp прокси сюда не передаются.
     return httpx.Client(timeout=15, trust_env=False,
                         transport=httpx.HTTPTransport(local_address='0.0.0.0'), headers={
-        'User-Agent': 'Mozilla/5.0', 'Referer': 'https://ssstik.io/ru',
+        'User-Agent': 'Mozilla/5.0', 'Referer': referer,
     })
 
 
@@ -25,7 +27,9 @@ def valid_media_url(url):
     parsed = urlsplit(url)
     hostname = parsed.hostname or ''
     return (parsed.scheme == 'https' and (hostname == 'tikcdn.io'
-            or hostname.endswith('.tiktokcdn-us.com'))
+            or hostname.endswith('.tiktokcdn-us.com')
+            or hostname.endswith('.cdninstagram.com')
+            or hostname.endswith('.fbcdn.net'))
             and parsed.port in (None, 443) and not parsed.username and not parsed.password)
 
 
@@ -50,6 +54,35 @@ class VideoLinks(HTMLParser):
                     or 'without watermark' in self.label.lower()):
                 self.links.append(self.href)
             self.href = ''
+
+
+def resolve_instagram(url, client):
+    shortcode = re.search(r'/(?:reels?|p)/([A-Za-z0-9_-]{1,50})(?:/|$)', urlsplit(url).path)
+    if not shortcode:
+        raise ServiceError('Нужна прямая ссылка на публичный Reels или видеопост Instagram.')
+    try:
+        response = client.get('https://www.instagram.com/p/' + shortcode.group(1) + '/embed/captioned/')
+        response.raise_for_status()
+        if len(response.content) > 4 * 1024 * 1024:
+            raise ServiceError('Instagram вернул слишком большую страницу.')
+        # В embed данные встречаются и как JSON, и как JSON внутри строки JavaScript.
+        json_string = r'"(?:[^"\\]|\\.)*"'
+        layers = [response.text]
+        for token in re.finditer(json_string, response.text):
+            if 'video_url' in token.group(0):
+                decoded = json.loads(token.group(0))
+                if isinstance(decoded, str):
+                    layers.append(decoded)
+        for layer in layers:
+            match = re.search(r'"video_url"\s*:\s*(' + json_string + ')', layer)
+            if match:
+                video_url = unescape(json.loads(match.group(1)))
+                host = urlsplit(video_url).hostname or ''
+                if valid_media_url(video_url) and host.endswith(('.cdninstagram.com', '.fbcdn.net')):
+                    return video_url
+        raise ServiceError('Instagram не отдал публичное видео. Проверь, что ролик доступен без входа.')
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ServiceError('Не удалось получить Reels с публичной страницы Instagram.') from exc
 
 
 def resolve_tiktok(url, client, provider='tikwm'):

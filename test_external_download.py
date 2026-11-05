@@ -1,14 +1,53 @@
 import tempfile
+import json
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
 import httpx
 
-from external_download import ServiceError, download_media, resolve_tiktok
+from external_download import ServiceError, download_media, resolve_tiktok, resolve_instagram
 
 
 class ServiceTests(unittest.TestCase):
+    def test_bot_reels_route_resolves_once_and_downloads_without_ytdlp(self):
+        import bot
+        video = b'\x00\x00\x00\x18ftypmp42' + b'x' * 100
+        requests = []
+
+        def handler(request):
+            requests.append(request.url.host)
+            if request.url.host == 'www.instagram.com':
+                return httpx.Response(200, text=json.dumps({'video_url': 'https://scontent.cdninstagram.com/video.mp4'}))
+            return httpx.Response(200, content=video)
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent / 'Temp') as folder:
+            with patch.object(bot, 'service_client', side_effect=lambda *a: self.client(handler)), \
+                    patch.object(bot, 'YoutubeDL', side_effect=AssertionError('Reels не должен вызывать yt-dlp')):
+                url = 'https://www.instagram.com/reel/example/'
+                info = bot.probe_video(url)
+                path = bot.download_video(url, Path(folder), info)
+                self.assertEqual(path.read_bytes(), video)
+        self.assertEqual(requests, ['www.instagram.com', 'scontent.cdninstagram.com'])
+
+    def test_instagram_embed_handles_nested_json_without_personal_cookies(self):
+        video = 'https://scontent-fra3-2.cdninstagram.com/video.mp4?a=1&b=2'
+        for page in [json.dumps({'video_url': video}),
+                     '<script>load(' + json.dumps(json.dumps({'video_url': video})) + ')</script>']:
+            def handler(request):
+                self.assertEqual(request.url.path, '/p/DfHCqvPtdf6/embed/captioned/')
+                self.assertNotIn('cookie', request.headers)
+                return httpx.Response(200, text=page)
+            with self.client(handler) as client:
+                self.assertEqual(resolve_instagram('https://www.instagram.com/reel/DfHCqvPtdf6/?tracking=1', client), video)
+
+    def test_instagram_rejects_missing_video_and_untrusted_cdn(self):
+        for page in ['<html>Login required</html>', '{"video_url":"https://127.0.0.1/video.mp4"}',
+                     '{"video_url":"https://cdninstagram.com.evil.example/video.mp4"}']:
+            with self.client(lambda r: httpx.Response(200, text=page)) as client:
+                with self.assertRaises(ServiceError):
+                    resolve_instagram('https://instagram.com/reel/example/', client)
+
     def test_public_reels_ignore_personal_cookies_but_youtube_keeps_support(self):
         import bot
         with patch.object(bot, 'resolve_cookiefile', return_value=Path('private-cookies.txt')):
