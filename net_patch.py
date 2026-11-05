@@ -165,7 +165,7 @@ def _watchdog() -> None:
             logger.error("Ни один известный адрес Telegram не отвечает")
 
 
-def install() -> str | None:
+def install(watchdog: bool = True) -> str | None:
     """Включить подмену. Вызывать до первого сетевого запроса."""
     global _current_ip
 
@@ -190,7 +190,8 @@ def install() -> str | None:
         _current_ip = ip
 
     socket.getaddrinfo = _patched_getaddrinfo
-    threading.Thread(target=_watchdog, name="tg-endpoint-watchdog", daemon=True).start()
+    if watchdog:
+        threading.Thread(target=_watchdog, name="tg-endpoint-watchdog", daemon=True).start()
     return ip
 
 

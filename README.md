@@ -131,7 +131,29 @@ bash /opt/skachat/deploy.sh
 
 ## Cookies
 
-Two different failures are both fixed by the same file:
+### TikTok download without personal cookies
+
+TikTok uses TikWM by default (`TIKTOK_DOWNLOADER=tikwm`). This path does not
+read personal cookies or use `TIKTOK_PROXY`. The bot resolves the media URL
+once and streams the MP4 with a size limit. Other platforms continue using yt-dlp.
+On 2026-11-06 the new module downloaded a complete 2,823,850-byte MP4 from
+Timeweb for the supplied public TikTok link. This was a standalone check,
+not a deployment or a Telegram delivery check.
+
+`TIKTOK_DOWNLOADER=yt-dlp` restores the old downloader. The experimental
+`TIKTOK_DOWNLOADER=ssstik` uses the ssstik.io form: it returned a link during
+the hosting check, but its media CDN did not deliver a confirmed file.
+SaveFrom returned `invalid_request` without its browser-generated signature;
+it is not integrated. Instagram through an external service remains unresolved.
+
+Offline checks: `python -m unittest test_external_download`.
+These checks use synthetic HTTP responses and no credentials.
+
+The historical shared-hosting daemon commands below and in README-server.md
+conflict with the current host restrictions: do not start or restart persistent
+processes there. Verify the supported hosting and runtime before deployment.
+
+For platforms using yt-dlp, cookies can help with these failures:
 
 - Instagram returns a login or rate-limit error.
 - A site answers `200` with an anti-bot page instead of the video, and yt-dlp

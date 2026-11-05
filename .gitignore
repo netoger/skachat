@@ -11,5 +11,6 @@ instagram_cookies.txt
 system_prompt.txt
 .venv/
 data/
+Temp/
 # Любые файлы кук — секретные сессии, никогда не коммитить
 *cookies*.txt

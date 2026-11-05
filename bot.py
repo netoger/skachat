@@ -32,6 +32,7 @@ from telegram.ext import (
 )
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+from external_download import ServiceError, download_media, resolve_tiktok, service_client
 
 
 load_dotenv()
@@ -57,6 +58,7 @@ MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "49"))
 # Прокси только для TikTok, например socks5://user:pass@host:1080 — он
 # блокирует российские адреса. Пусто — качать напрямую.
 TIKTOK_PROXY = os.getenv("TIKTOK_PROXY", "").strip()
+TIKTOK_DOWNLOADER = os.getenv("TIKTOK_DOWNLOADER", "tikwm").strip().lower()
 CLEANUP_MAX_AGE_HOURS = int(os.getenv("CLEANUP_MAX_AGE_HOURS", "24"))
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "10"))
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "60"))
@@ -577,6 +579,10 @@ async def post_init(application: Application) -> None:
 
 
 def probe_video(url: str) -> dict:
+    if is_tiktok(url) and TIKTOK_DOWNLOADER in ('tikwm', 'ssstik'):
+        with service_client() as client:
+            media_url = resolve_tiktok(url, client, TIKTOK_DOWNLOADER)
+        return {'title': 'TikTok', '_service_media_url': media_url}
     opts = build_ydl_opts(url, skip_download=True)
     with YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
@@ -604,8 +610,14 @@ def choose_estimated_size(info: dict) -> Optional[int]:
     return None
 
 
-def download_video(url: str, job_dir: Path) -> Path:
+def download_video(url: str, job_dir: Path, info: Optional[dict] = None) -> Path:
     job_dir.mkdir(parents=True, exist_ok=True)
+    if is_tiktok(url) and TIKTOK_DOWNLOADER in ('tikwm', 'ssstik'):
+        media_url = (info or probe_video(url))['_service_media_url']
+        path = job_dir / 'tiktok.mp4'
+        with service_client() as client:
+            download_media(media_url, path, MAX_FILE_SIZE, client)
+        return path
     opts = build_ydl_opts(url, outtmpl=build_output_template(job_dir))
 
     with YoutubeDL(opts) as ydl:
@@ -744,7 +756,7 @@ async def handle_download(
                 await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
 
                 job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
-                file_path = await asyncio.to_thread(download_video, url, job_dir)
+                file_path = await asyncio.to_thread(download_video, url, job_dir, info)
 
                 actual_size = file_path.stat().st_size
                 if actual_size > MAX_FILE_SIZE:
@@ -764,6 +776,9 @@ async def handle_download(
                     )
 
                 await safe_delete_message(status)
+            except ServiceError as exc:
+                logger.warning('Ошибка внешнего загрузчика: %s', exc)
+                await safe_edit_status(status, str(exc) + ' Попробуй позже.')
             except DownloadError as exc:
                 logger.exception("Download failed for url=%s", url)
                 details = str(exc)
@@ -952,6 +967,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await handle_chat(update, context, text)
 
 
+def build_application(persistence=None):
+    builder = (Application.builder().token(BOT_TOKEN)
+               .concurrent_updates(CONCURRENT_UPDATES).post_init(post_init))
+    if persistence is not None:
+        builder = builder.persistence(persistence).updater(None)
+    application = builder.build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reset", reset_dialog))
+    application.add_handler(CommandHandler("id", show_id))
+    application.add_handler(
+        CallbackQueryHandler(handle_subscription_check, pattern=f"^{VERIFY_SUBSCRIPTION_CALLBACK}$")
+    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(on_error)
+    return application
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and configure it.")
@@ -980,21 +1012,7 @@ def main() -> None:
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     cleanup_stale_downloads()
 
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(CONCURRENT_UPDATES)
-        .post_init(post_init)
-        .build()
-    )
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reset", reset_dialog))
-    application.add_handler(CommandHandler("id", show_id))
-    application.add_handler(
-        CallbackQueryHandler(handle_subscription_check, pattern=f"^{VERIFY_SUBSCRIPTION_CALLBACK}$")
-    )
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(on_error)
+    application = build_application()
 
     logger.info("Bot is running")
     application.run_polling()

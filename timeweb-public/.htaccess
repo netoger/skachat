@@ -1,0 +1,6 @@
+Options -Indexes +ExecCGI
+AddHandler cgi-script .py
+
+<FilesMatch "^(?!webhook\.py$)">
+    Require all denied
+</FilesMatch>
