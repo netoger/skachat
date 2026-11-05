@@ -131,11 +131,13 @@ bash /opt/skachat/deploy.sh
 
 ## Cookies
 
-Public Instagram Reels now use yt-dlp >=2026.10.21 without personal cookies,
-even if an old cookies file remains on the server. On 2026-11-06 this removed
-the previous authenticated HTTP 400, but Instagram requests from Timeweb still
-intermittently timed out. A complete Reels download is not yet confirmed.
-The supplied YouTube Shorts sample downloaded completely after the update:
+Public Instagram Reels use the anonymous `/p/SHORTCODE/embed/captioned/` page.
+The bot extracts `video_url` from its JSON and streams the MP4 directly from
+Instagram's CDN. This path does not use yt-dlp or read personal cookies,
+even if an old cookies file remains on the server. The supplied Reels sample
+downloaded completely twice from Timeweb on 2026-11-06: 8,325,643 bytes,
+verified MP4. Connection errors are retried twice; private videos are unsupported.
+YouTube continues using yt-dlp >=2026.10.21. The supplied Shorts sample downloaded completely:
 MP4, 13,370,661 bytes. User delivery through Telegram is a separate check.
 
 ### TikTok download without personal cookies
@@ -151,7 +153,7 @@ not a deployment or a Telegram delivery check.
 `TIKTOK_DOWNLOADER=ssstik` uses the ssstik.io form: it returned a link during
 the hosting check, but its media CDN did not deliver a confirmed file.
 SaveFrom returned `invalid_request` without its browser-generated signature;
-it is not integrated. Instagram through an external service remains unresolved.
+it is not integrated. Instagram uses its public embed page directly.
 
 Offline checks: `python -m unittest test_external_download`.
 These checks use synthetic HTTP responses and no credentials.

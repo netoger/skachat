@@ -3,7 +3,7 @@
 Состояние на 06.11.2026: выполнена выкладка и зарегистрирован webhook
 https://togeer.tw1.ru/webhook.py. Webroot: /home/c/cc250576/togeeer/public_html.
 Backend: /home/c/cc250576/skachat, ветка codex/timeweb-webhook.
-Одиннадцать автономных тестов проходят локально и на сервере, CGI и TLS проверены,
+Четырнадцать автономных тестов проходят локально и на сервере, CGI и TLS проверены,
 служебные пути закрыты HTTP 403. getWebhookInfo: pending=0, last_error отсутствует.
 Прежний polling остановлен, BOT_MODE=webhook установлен в серверном .env.
 Реальная отправка ролика пользователем через новый webhook ещё не проверена.
@@ -33,7 +33,8 @@ venv аккаунта; при другой площадке исправить �
 
 Используется штатный CGI Apache, не `run_webhook`, ASGI или отдельный HTTP-сервер.
 Нужны исходящие HTTPS-запросы Telegram, TikWM и CDN видео. Персональные
-cookies не нужны TikWM. Внешний загрузчик Instagram пока не подключён.
+cookies не нужны TikWM. Instagram использует публичную embed-страницу
+и прямой CDN без личных cookies.
 
 ## Проверка и переключение
 
