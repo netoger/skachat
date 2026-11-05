@@ -85,7 +85,7 @@ MAX_FILE_SIZE = MAX_DOWNLOAD_MB * 1024 * 1024
 BASE_DIR = Path(__file__).resolve().parent
 # Defaults resolve next to bot.py so the bot runs both locally and in Docker
 # (WORKDIR /app), regardless of the current working directory.
-DOWNLOAD_DIR = BASE_DIR / "downloads"
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', str(BASE_DIR / 'downloads')))
 # Счётчики лимита держим в файле, иначе перезапуск бота обнулял бы их
 AI_USAGE_PATH = Path(os.getenv("AI_USAGE_FILE", str(BASE_DIR / "data" / "ai_usage.json")))
 MOSCOW_TZ = timezone(timedelta(hours=3))
