@@ -3,7 +3,7 @@
 Состояние на 06.11.2026: выполнена выкладка и зарегистрирован webhook
 https://togeer.tw1.ru/webhook.py. Webroot: /home/c/cc250576/togeeer/public_html.
 Backend: /home/c/cc250576/skachat, ветка codex/timeweb-webhook.
-Десять автономных тестов проходят локально и на сервере, CGI и TLS проверены,
+Одиннадцать автономных тестов проходят локально и на сервере, CGI и TLS проверены,
 служебные пути закрыты HTTP 403. getWebhookInfo: pending=0, last_error отсутствует.
 Прежний polling остановлен, BOT_MODE=webhook установлен в серверном .env.
 Реальная отправка ролика пользователем через новый webhook ещё не проверена.

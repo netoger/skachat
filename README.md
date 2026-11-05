@@ -131,6 +131,13 @@ bash /opt/skachat/deploy.sh
 
 ## Cookies
 
+Public Instagram Reels now use yt-dlp >=2026.10.21 without personal cookies,
+even if an old cookies file remains on the server. On 2026-11-06 this removed
+the previous authenticated HTTP 400, but Instagram requests from Timeweb still
+intermittently timed out. A complete Reels download is not yet confirmed.
+The supplied YouTube Shorts sample downloaded completely after the update:
+MP4, 13,370,661 bytes. User delivery through Telegram is a separate check.
+
 ### TikTok download without personal cookies
 
 TikTok uses TikWM by default (`TIKTOK_DOWNLOADER=tikwm`). This path does not
@@ -155,7 +162,6 @@ processes there. Verify the supported hosting and runtime before deployment.
 
 For platforms using yt-dlp, cookies can help with these failures:
 
-- Instagram returns a login or rate-limit error.
 - A site answers `200` with an anti-bot page instead of the video, and yt-dlp
   reports `Unexpected response from webpage request`. TikTok does this to
   datacenter IP ranges — the link itself is fine and opens from a normal
@@ -168,9 +174,9 @@ Place a cookies file next to `bot.py`:
 cookies.txt
 ```
 
-One file covers every site: the Netscape format stores cookies per domain, so
-exporting from a logged-in browser session gives Instagram and TikTok cookies
-at once. `COOKIES_FILE` overrides the location. The older
+The Netscape format stores cookies per domain. TikWM and public Instagram
+extraction do not read personal cookies. For other yt-dlp paths,
+`COOKIES_FILE` overrides the location. The older
 `instagram_cookies.txt` name still works and is used when `cookies.txt` is
 absent, so existing deployments keep running.
 
