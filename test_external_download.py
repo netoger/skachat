@@ -1,5 +1,6 @@
 import tempfile
 import json
+import os
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 import httpx
 
 from external_download import ServiceError, download_media, resolve_tiktok, resolve_instagram
+
+os.environ.setdefault('SYSTEM_PROMPT_PATH', str(Path(__file__).parent / 'system_prompt.example.txt'))
 
 
 class ServiceTests(unittest.TestCase):

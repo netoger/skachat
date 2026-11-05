@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+os.environ.setdefault('SYSTEM_PROMPT_PATH', str(Path(__file__).parent / 'system_prompt.example.txt'))
 import bot
 from telegram.error import BadRequest
 
