@@ -5,12 +5,14 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 import httpx
+import os
+import asyncio
 
 from webhook_cgi import RequestError, read_update
 
 from telegram.ext import Application, ExtBot, MessageHandler, PicklePersistence, filters
 from telegram.request import BaseRequest
-from webhook_cgi import process_once
+from webhook_cgi import process_once, request_user_id, prepare_persistence, prepare_usage_file, request_locks
 
 
 class FakeRequest(BaseRequest):
@@ -29,6 +31,24 @@ class FakeRequest(BaseRequest):
 
 
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_storage_migrates_dialogs_independently(self):
+        root = Path(__file__).parent / 'Temp'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as folder:
+            data = Path(folder)
+            legacy = PicklePersistence(filepath=data / 'webhook_state.pickle', on_flush=True)
+            await legacy.update_user_data(7, {'chat_history': ['old'], 'downloading': True})
+            await legacy.update_user_data(8, {'chat_history': ['other']})
+            await legacy.update_bot_data({'webhook_completed': [42]})
+            await legacy.flush()
+            first = await prepare_persistence(data, 7)
+            second = await prepare_persistence(data, 8)
+            self.assertEqual((await first.get_user_data())[7]['chat_history'], ['old'])
+            self.assertNotIn(8, await first.get_user_data())
+            self.assertNotIn('downloading', (await first.get_user_data())[7])
+            self.assertEqual((await second.get_user_data())[8]['chat_history'], ['other'])
+            self.assertEqual((await first.get_bot_data())['webhook_completed'], [42])
+
     async def test_repeated_delivery_is_skipped_and_dialog_survives_restart(self):
         calls = []
 
@@ -56,6 +76,36 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RequestTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'Файловые блокировки проверяются на Linux-сервере')
+    def test_different_users_do_not_block_but_same_user_is_serialized(self):
+        root = Path(__file__).parent / 'Temp'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as folder:
+            with request_locks(Path(folder), 7):
+                with request_locks(Path(folder), 8):
+                    pass
+                with self.assertRaises(RequestError) as caught:
+                    with request_locks(Path(folder), 7):
+                        pass
+                self.assertEqual(caught.exception.status, 503)
+
+    def test_message_and_callback_have_same_safe_user_identity(self):
+        self.assertEqual(request_user_id({'message': {'from': {'id': 7}}}), 7)
+        self.assertEqual(request_user_id({'callback_query': {'from': {'id': 7}}}), 7)
+        for value in ['../../outside', True, -1, None]:
+            self.assertEqual(request_user_id({'message': {'from': {'id': value}}}), 0)
+
+    def test_quota_migration_does_not_reset_limit_or_copy_other_users(self):
+        root = Path(__file__).parent / 'Temp'
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as folder:
+            data = Path(folder)
+            legacy = data / 'ai_usage.json'
+            legacy.write_text(json.dumps({'day': '2026-11-06', 'counts': {'7': 4, '8': 9}}))
+            path = prepare_usage_file(data, 7, legacy)
+            self.assertEqual(json.loads(path.read_text())['counts'], {'7': 4})
+            self.assertEqual(prepare_usage_file(data, 7, legacy), path)
+
     def test_registration_preserves_pending_updates(self):
         from configure_webhook import register
 
@@ -63,7 +113,7 @@ class RequestTests(unittest.TestCase):
             self.assertTrue(request.url.path.endswith('/setWebhook'))
             body = json.loads(request.content)
             self.assertFalse(body['drop_pending_updates'])
-            self.assertEqual(body['max_connections'], 1)
+            self.assertEqual(body['max_connections'], 3)
             self.assertEqual(body['secret_token'], 'test-secret')
             return httpx.Response(200, json={'ok': True, 'result': True})
 

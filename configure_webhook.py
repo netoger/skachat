@@ -40,7 +40,7 @@ def register(url, token, secret):
     with httpx.Client(timeout=20, trust_env=False,
                       transport=httpx.HTTPTransport(local_address='0.0.0.0')) as client:
         response = client.post('https://api.telegram.org/bot' + token + '/setWebhook', json={
-            'url': url, 'secret_token': secret, 'max_connections': 1,
+            'url': url, 'secret_token': secret, 'max_connections': 3,
             'allowed_updates': ['message', 'callback_query'], 'drop_pending_updates': False,
         })
         if response.status_code != 200 or not response.json().get('ok'):

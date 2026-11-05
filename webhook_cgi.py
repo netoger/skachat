@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from contextlib import contextmanager
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -70,29 +71,84 @@ async def process_once(application, payload):
         await application.persistence.flush()
 
 
+def request_user_id(payload):
+    body = payload.get('message') or payload.get('callback_query') or {}
+    value = body.get('from', {}).get('id')
+    return value if type(value) is int and value > 0 else 0
+
+
+async def prepare_persistence(data_dir, user_id):
+    from telegram.ext import PicklePersistence, PersistenceInput
+    users_dir = data_dir / 'users'
+    users_dir.mkdir(exist_ok=True)
+    path = users_dir / f'{user_id}.pickle'
+    persistence = PicklePersistence(filepath=path, on_flush=True,
+                                   store_data=PersistenceInput(chat_data=False, callback_data=False))
+    legacy_path = data_dir / 'webhook_state.pickle'
+    if not path.exists() and legacy_path.exists():
+        legacy = PicklePersistence(filepath=legacy_path)
+        old_user = (await legacy.get_user_data()).get(user_id, {})
+        await persistence.update_user_data(user_id, {'chat_history': old_user.get('chat_history', [])})
+        await persistence.update_bot_data({
+            'webhook_completed': (await legacy.get_bot_data()).get('webhook_completed', []),
+        })
+        await persistence.flush()
+    return persistence
+
+
+def prepare_usage_file(data_dir, user_id, legacy_path):
+    users_dir = data_dir / 'users'
+    users_dir.mkdir(exist_ok=True)
+    path = users_dir / f'{user_id}.usage.json'
+    if not path.exists() and legacy_path.exists():
+        data = json.loads(legacy_path.read_text(encoding='utf-8'))
+        data['counts'] = {str(user_id): data.get('counts', {}).get(str(user_id), 0)}
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(data), encoding='utf-8')
+        temporary.replace(path)
+    return path
+
+
+@contextmanager
+def request_locks(data_dir, user_id):
+    import fcntl
+    data_dir.mkdir(exist_ok=True)
+    with (data_dir / 'webhook.lock').open('a') as lock:
+        try:
+            # Общая разделяемая блокировка пропускает новые запросы параллельно,
+            # но ждёт завершения прежнего обработчика с эксклюзивной блокировкой.
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RequestError(503)
+        users_dir = data_dir / 'users'
+        users_dir.mkdir(exist_ok=True)
+        with (users_dir / f'{user_id}.lock').open('a') as user_lock:
+            try:
+                fcntl.flock(user_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RequestError(503)
+            yield
+
+
 def handle_request(environ, stream):
     from dotenv import load_dotenv
     load_dotenv(BASE_DIR / '.env')
     payload = read_update(environ, stream, os.getenv('WEBHOOK_SECRET', ''))
-
-    import fcntl
     data_dir = BASE_DIR / 'data'
-    data_dir.mkdir(exist_ok=True)
-    with (data_dir / 'webhook.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RequestError(503)
-        # Импорт после блокировки: JSON-счётчик ИИ читается заново на запрос.
+    user_id = request_user_id(payload)
+    with request_locks(data_dir, user_id):
+        legacy_usage = Path(os.getenv('AI_USAGE_FILE', str(data_dir / 'ai_usage.json')))
+        os.environ['AI_USAGE_FILE'] = str(prepare_usage_file(data_dir, user_id, legacy_usage))
+        # Импорт после блокировки и выбора личного счётчика ИИ.
         import net_patch
         net_patch.install(watchdog=False)
         from bot import build_application
-        from telegram.ext import PicklePersistence, PersistenceInput
-        persistence = PicklePersistence(
-            filepath=data_dir / 'webhook_state.pickle', on_flush=True,
-            store_data=PersistenceInput(chat_data=False, callback_data=False),
-        )
-        asyncio.run(process_once(build_application(persistence), payload))
+
+        async def process_user():
+            persistence = await prepare_persistence(data_dir, user_id)
+            await process_once(build_application(persistence), payload)
+
+        asyncio.run(process_user())
 
 
 def main():

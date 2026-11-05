@@ -6,6 +6,7 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -73,7 +74,7 @@ if not REQUIRED_CHANNELS_RAW and os.getenv("REQUIRED_CHANNEL", "").strip():
         for part in (os.getenv("REQUIRED_CHANNEL", "").strip(), os.getenv("REQUIRED_CHANNEL_URL", "").strip())
         if part
     )
-SUBSCRIPTION_CACHE_SECONDS = int(os.getenv("SUBSCRIPTION_CACHE_SECONDS", "300"))
+SUBSCRIPTION_CACHE_SECONDS = int(os.getenv("SUBSCRIPTION_CACHE_SECONDS", "0"))
 
 # Concurrency / reliability knobs.
 CONCURRENT_UPDATES = int(os.getenv("CONCURRENT_UPDATES", "8"))
@@ -391,6 +392,58 @@ async def safe_delete_message(message) -> None:
         logger.exception("Failed to delete message")
 
 
+@asynccontextmanager
+async def loading_animation(status, interval=2.0):
+    async def animate():
+        frames = ('.', '..', '...', '..', '.', '')
+        index = 0
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await status.edit_text('Загрузка' + frames[index % len(frames)])
+            except Exception:
+                # Анимация необязательна: ошибка или лимит Telegram не прерывают скачивание.
+                return
+            index += 1
+
+    task = asyncio.create_task(animate())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@asynccontextmanager
+async def download_slot():
+    if os.getenv('BOT_MODE', 'polling') != 'webhook':
+        async with download_semaphore:
+            yield
+        return
+    import fcntl
+    slots = BASE_DIR / 'data' / 'download_slots'
+    slots.mkdir(parents=True, exist_ok=True)
+    acquired = None
+    try:
+        while acquired is None:
+            for index in range(MAX_CONCURRENT_DOWNLOADS):
+                candidate = (slots / f'{index}.lock').open('a')
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    candidate.close()
+                else:
+                    acquired = candidate
+                    break
+            if acquired is None:
+                await asyncio.sleep(0.25)
+        yield
+    finally:
+        if acquired is not None:
+            acquired.close()
+
+
 class Channel(NamedTuple):
     chat_id: str  # @username или числовой id вида -100…
     url: str      # куда ведёт кнопка «Подписаться»
@@ -452,22 +505,18 @@ async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, channel: Channel
     try:
         member = await context.bot.get_chat_member(chat_id=channel.chat_id, user_id=user_id)
     except BadRequest as exc:
-        # Telegram не даёт смотреть подписчиков: бот не админ канала или имя
-        # канала неверное. Закрыть бота для всех из-за ошибки настройки хуже,
-        # чем временно пропустить без проверки, — поэтому пускаем и шумим в журнал.
         if "user not found" in str(exc).lower():
             return False
         logger.error(
-            "Не удалось проверить подписку на %s (%s) — пропускаем без проверки. "
+            "Не удалось проверить подписку на %s (%s) — доступ закрыт. "
             "Сделайте бота администратором канала.",
             channel.chat_id,
             exc,
         )
-        return True
+        return False
     except Exception:
-        # Сетевой сбой: не отказываем подписчику из-за моргнувшей связи
         logger.exception("Subscription check failed for %s, user_id=%s", channel.chat_id, user_id)
-        return True
+        return False
     if member.status in ("member", "administrator", "creator"):
         return True
     # Подписчик с ограничениями в канале — всё равно подписчик
@@ -501,10 +550,8 @@ async def ensure_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not user or not message:
         return False
 
-    if user.id in ADMIN_USER_IDS:
-        return True
-
-    if context.user_data.get("sub_verified") and time.time() < context.user_data.get("sub_verified_until", 0):
+    if (SUBSCRIPTION_CACHE_SECONDS > 0 and context.user_data.get("sub_verified")
+            and time.time() < context.user_data.get("sub_verified_until", 0)):
         return True
 
     missing = await missing_channels(context, user.id)
@@ -570,7 +617,7 @@ async def post_init(application: Application) -> None:
             logger.error(
                 "Канал %s: не удалось проверить права бота (%s). Проверьте запись в "
                 "REQUIRED_CHANNELS и что бот добавлен в канал администратором — до тех пор "
-                "подписка на этот канал не проверяется.",
+                "доступ без подтверждённой подписки закрыт.",
                 channel.chat_id,
                 exc,
             )
@@ -579,7 +626,7 @@ async def post_init(application: Application) -> None:
             logger.info("Subscription gate active for channel %s", channel.chat_id)
         else:
             logger.error(
-                "Бот не администратор канала %s — подписка на него не проверяется. "
+                "Бот не администратор канала %s — проверка подписки может быть недоступна. "
                 "Добавьте бота в администраторы канала.",
                 channel.chat_id,
             )
@@ -748,11 +795,12 @@ async def handle_download(
                 "Сервер сейчас занят другими загрузками, подождите немного..."
             )
         else:
-            status = await message.reply_text("Проверяю ссылку и доступность видео...")
+            status = await message.reply_text("Загрузка")
 
-        async with download_semaphore:
+        async with download_slot():
             try:
-                info = await asyncio.to_thread(probe_video, url)
+                async with loading_animation(status):
+                    info = await asyncio.to_thread(probe_video, url)
                 estimated_size = choose_estimated_size(info)
                 title = sanitize_name(info.get("title") or "video")
 
@@ -764,11 +812,12 @@ async def handle_download(
                     )
                     return
 
-                await safe_edit_status(status, f"Скачиваю: {title}")
+                await safe_edit_status(status, 'Загрузка')
                 await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_DOCUMENT)
 
                 job_dir = DOWNLOAD_DIR / uuid.uuid4().hex
-                file_path = await asyncio.to_thread(download_video, url, job_dir, info)
+                async with loading_animation(status):
+                    file_path = await asyncio.to_thread(download_video, url, job_dir, info)
 
                 actual_size = file_path.stat().st_size
                 if actual_size > MAX_FILE_SIZE:
@@ -780,6 +829,7 @@ async def handle_download(
                     return
 
                 caption = f"{title}\nИсточник: {url}"
+                await safe_edit_status(status, 'Отправляю видео…')
                 with file_path.open("rb") as file_handle:
                     await message.reply_document(
                         document=file_handle,
