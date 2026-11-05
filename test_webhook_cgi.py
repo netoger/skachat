@@ -3,6 +3,8 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
+import httpx
 
 from webhook_cgi import RequestError, read_update
 
@@ -54,6 +56,22 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RequestTests(unittest.TestCase):
+    def test_registration_preserves_pending_updates(self):
+        from configure_webhook import register
+
+        def handler(request):
+            self.assertTrue(request.url.path.endswith('/setWebhook'))
+            body = json.loads(request.content)
+            self.assertFalse(body['drop_pending_updates'])
+            self.assertEqual(body['max_connections'], 1)
+            self.assertEqual(body['secret_token'], 'test-secret')
+            return httpx.Response(200, json={'ok': True, 'result': True})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with patch('net_patch.install') as install, patch('configure_webhook.httpx.Client', return_value=client):
+            register('https://example.com/webhook.py', '123:TEST', 'test-secret')
+            install.assert_called_once_with(watchdog=False)
+
     def request(self, payload=None, **changes):
         body = json.dumps(payload if payload is not None else {'update_id': 42}).encode()
         env = {'REQUEST_METHOD': 'POST', 'CONTENT_LENGTH': str(len(body)),

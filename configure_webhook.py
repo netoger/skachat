@@ -1,7 +1,6 @@
 """Проверка HTTPS и разовая регистрация webhook; ничего не запускает в фоне."""
 
 import argparse
-import asyncio
 import logging
 import os
 import re
@@ -34,13 +33,18 @@ def check_url(url):
             raise RuntimeError('Webhook принимает запрос без секретного заголовка')
 
 
-async def register(url, token, secret):
+def register(url, token, secret):
     import net_patch
     net_patch.install(watchdog=False)
-    from telegram import Bot
-    async with Bot(token) as bot:
-        await bot.set_webhook(url, secret_token=secret, max_connections=1,
-                              allowed_updates=['message', 'callback_query'], drop_pending_updates=False)
+    # Синхронный транспорт использует подмену DNS даже после импорта httpx.
+    with httpx.Client(timeout=20, trust_env=False,
+                      transport=httpx.HTTPTransport(local_address='0.0.0.0')) as client:
+        response = client.post('https://api.telegram.org/bot' + token + '/setWebhook', json={
+            'url': url, 'secret_token': secret, 'max_connections': 1,
+            'allowed_updates': ['message', 'callback_query'], 'drop_pending_updates': False,
+        })
+        if response.status_code != 200 or not response.json().get('ok'):
+            raise RuntimeError('Telegram не подтвердил регистрацию webhook.')
 
 
 def main():
@@ -78,7 +82,7 @@ def main():
         })
         if response.status_code != 200:
             raise RuntimeError('Backend не прошёл проверку; webhook не изменён.')
-    asyncio.run(register(args.url, config['BOT_TOKEN'], secret))
+    register(args.url, config['BOT_TOKEN'], secret)
     print('Webhook зарегистрирован. Фоновые службы не запущены.')
 
 
