@@ -2,15 +2,17 @@
 
 Состояние на 06.11.2026: выполнена выкладка и зарегистрирован webhook
 https://togeer.tw1.ru/webhook.py. Webroot: /home/c/cc250576/togeeer/public_html.
-Backend: /home/c/cc250576/skachat, ветка codex/timeweb-webhook.
-24 автономных теста проходят на Linux-сервере (на Windows два Linux-теста
+Исходный git-клон: /home/c/cc250576/skachat, ветка codex/timeweb-webhook.
+Рабочий backend: /home/c/cc250576/togeeer/public_html/app, detached git-worktree
+того же репозитория. 27 автономных тестов проходят на Linux-сервере (на Windows два Linux-теста
 пропускаются), CGI и TLS проверены,
-служебные пути закрыты HTTP 403. getWebhookInfo: pending=0, last_error отсутствует.
+секреты и данные закрыты HTTP 403. getWebhookInfo: pending=0;
+поле last_error может сохранять историческую ошибку после восстановления.
 Прежний polling остановлен, BOT_MODE=webhook установлен в серверном .env.
 Реальная отправка ролика пользователем через новый webhook ещё не проверена.
 Остальные сайты не изменять. start/restart/update в skachatctl.sh заблокированы,
 ensure ничего не запускает. Для обновления backend после сверки git status
-использовать git pull --ff-only origin codex/timeweb-webhook.
+обновлять и исходный клон, и рабочий worktree по инструкции ниже.
 
 ## Что нужно в панели
 
@@ -22,27 +24,64 @@ ensure ничего не запускает. Для обновления backend
 
 ## Размещение
 
-Backend остаётся в `/home/c/cc250576/skachat`, вне webroot. `.env`, cookies,
-персональный prompt и `data` не переносить в публичный каталог.
-Перед выкладкой повторно сверить серверный git status и изменения файлов.
-Использовать согласованный git-деплой backend; не затирать серверные изменения.
+CGI этой площадки не может читать backend вне webroot: stat/access могут
+проходить, а open/listdir возвращают PermissionError. Это проверено именно
+для текущего сайта, не обобщать на все Python-площадки.
 
-В выделенный webroot попадают только файлы из `timeweb-public/`:
-`.htaccess` и `webhook.py`. Скрипт содержит проверенный путь к существующему
-venv аккаунта; при другой площадке исправить его до выкладки. Файлы Linux
-должны иметь LF; для `webhook.py` нужны права 755, `.htaccess` — 644.
+В webroot лежат `.htaccess` и `webhook.py`, backend и зависимости — в `app/`.
+Launcher запускается `/usr/bin/python3` (3.10.12), добавляет библиотеки
+`app/.venv/lib/python3.10/site-packages` **перед** системными пакетами, затем
+импортирует backend. Venv-интерпретатор в shebang здесь даёт HTTP 500;
+добавление библиотек в конец sys.path вызывает конфликт cffi 2.1.1/1.15.0.
+
+`app/.htaccess` содержит Require all denied, корневой .htaccess запрещает /app/.
+Но nginx отдаёт некоторые статические расширения в обход Apache: проверка
+обнаружила HTTP 200 для тестовых .txt/.js даже при app=700. Поэтому приватный
+prompt хранится как `app/system_prompt.php`, секреты — `app/.env`, состояние —
+в `app/data` (.json/.pickle/.log). Для этих реальных путей HTTP 403 проверен.
+Видео хранятся только в `/tmp/skachat-cc250576-downloads`, вне HTTP-каталогов.
+Не класть приватные .txt, медиа, архивы или резервные копии в app.
+
+Истории, лимиты, prompt и .env скопированы из старого backend; оригиналы оставлены
+в ~/skachat как резервная копия. Боевые данные теперь только в app. Старый .env
+не использовать для изменения настроек работающего CGI. Личные cookies не копировались.
+app и data — 700, .env/prompt — 600; публичный webhook.py — 755, .htaccess — 644.
+Файлы Linux должны иметь LF.
 
 Используется штатный CGI Apache, не `run_webhook`, ASGI или отдельный HTTP-сервер.
 Нужны исходящие HTTPS-запросы Telegram, TikWM и CDN видео. Персональные
-cookies не нужны TikWM. Instagram использует публичную embed-страницу
-и прямой CDN без личных cookies.
+cookies не нужны TikWM. Instagram получает оглавление видео через VXInstagram,
+используя профиль TelegramBot для страницы и MP4; прямой embed Instagram —
+анонимный резерв. При обычном профиле файла VXInstagram отвечает 302.
+
+После исправления проверены **полные файлы через CGI**, не только SSH:
+TikTok — 2 823 850 байт, Shorts — 13 370 661 байт, Reels — 8 325 643 байта
+дважды за 1,54 и 1,33 с. Служебные тесты не отправляли сообщения и не вызывали ИИ.
+
+## Обновление кода
+
+Сначала сверить git status обоих каталогов; при чужих изменениях не делать reset/checkout.
+Данные, .env, prompt и .venv сохраняются; не копировать старые поверх боевых.
+
+```bash
+cd /home/c/cc250576/skachat
+git diff --quiet && git diff --cached --quiet
+git pull --ff-only origin codex/timeweb-webhook
+git -C /home/c/cc250576/togeeer/public_html/app diff --quiet
+git -C /home/c/cc250576/togeeer/public_html/app merge --ff-only "$(git rev-parse HEAD)"
+```
+
+Если изменился launcher — скопировать timeweb-public/webhook.py в webroot,
+сохранив 755. Корневой .htaccess брать из timeweb-public/.htaccess,
+защиту app — из timeweb-public/app.htaccess. При обновлении зависимостей
+запускать `app/.venv/bin/python -m pip`, а не скопированный скрипт pip.
 
 ## Проверка и переключение
 
 После выкладки выполнить на сервере (DOMAIN заменить реальным адресом):
 
 ```bash
-cd /home/c/cc250576/skachat
+cd /home/c/cc250576/togeeer/public_html/app
 .venv/bin/python configure_webhook.py https://DOMAIN/webhook.py
 ```
 

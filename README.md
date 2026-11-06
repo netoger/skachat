@@ -78,6 +78,10 @@ the key:
 cd ~/skachat && .venv/bin/python check_ai.py
 ```
 
+For the current Timeweb deployment, run commands from
+`~/togeeer/public_html/app`; `~/skachat` is the source clone and retained backup.
+See [README-webhook.md](README-webhook.md) before deployment or configuration changes.
+
 It prints the resolved provider, URL and model, makes one real request, and
 never prints the key itself.
 
@@ -141,12 +145,12 @@ bash /opt/skachat/deploy.sh
 
 ## Cookies
 
-Public Instagram Reels use the anonymous `/p/SHORTCODE/embed/captioned/` page.
-The bot extracts `video_url` from its JSON and streams the MP4 directly from
-Instagram's CDN. This path does not use yt-dlp or read personal cookies,
-even if an old cookies file remains on the server. The supplied Reels sample
-downloaded completely twice from Timeweb on 2026-11-06: 8,325,643 bytes,
-verified MP4. Connection errors are retried twice; private videos are unsupported.
+Public Instagram Reels use [VXInstagram](https://github.com/Lainmode/InstagramEmbed-vxinstagram)
+Open Graph metadata and its MP4 endpoint, with the same embedding User-Agent
+for both. The anonymous Instagram embed page is a fallback. This path does not
+use yt-dlp or personal cookies. The supplied Reels sample downloaded completely
+twice through the actual Timeweb CGI on 2026-11-06: 8,325,643-byte MP4,
+in 1.54 and 1.33 seconds. Connection errors are retried twice; private videos are unsupported.
 YouTube continues using yt-dlp >=2026.10.21. The supplied Shorts sample downloaded completely:
 MP4, 13,370,661 bytes. User delivery through Telegram is a separate check.
 

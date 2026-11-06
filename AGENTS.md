@@ -21,18 +21,31 @@ VPS 109.122.194.113 не считать действующей площадко�
 Webhook зарегистрирован 06.11.2026 на https://togeer.tw1.ru/webhook.py.
 Прежний polling остановлен, BOT_MODE=webhook в серверном .env.
 
-Подготовленный CGI-вариант описан в README-webhook.md. Публичны только
-timeweb-public/webhook.py и .htaccess; backend, .env и data остаются вне webroot.
+Рабочий CGI-вариант описан в README-webhook.md. Исходный git-клон остаётся
+~/skachat; runtime — ~/togeeer/public_html/app (detached worktree этого repo).
+CGI не читает ~/skachat: stat проходит, open/listdir запрещены. Не возвращать
+backend за webroot без проверки. Launcher — системный /usr/bin/python3 (3.10),
+библиотеки app/.venv добавляются перед системными пакетами (иначе конфликт cffi).
+Venv-интерпретатор в shebang вызывает HTTP 500.
+В app/.env, app/data и app/system_prompt.php перенесены копии боевых данных;
+старые оригиналы в ~/skachat сохранены как резерв, не считать их актуальными.
+Оба .htaccess запрещают HTTP-доступ к app, но nginx обходит их для статики.
+Для .env, prompt.php, .json, .pickle, .log проверен 403; приватные .txt/медиа/
+архивы в app не размещать. DOWNLOAD_DIR=/tmp/skachat-cc250576-downloads.
+Cookies не копировались. Боевые настройки менять только в app/.env.
 configure_webhook.py без --apply только проверяет HTTPS; --apply меняет webhook
 и создаёт секрет в серверном .env. Не применять до проверки сайта и остановки
 прежнего polling. Тесты: .venv/Scripts/python.exe -m unittest
-test_external_download test_webhook_cgi test_bot_behavior. 24 теста проходят
+test_external_download test_webhook_cgi test_bot_behavior. 27 тестов проходят
 на Linux-сервере, на Windows два Linux-теста пропускаются.
 Публичный CGI и TLS проверены, служебные пути возвращают 403.
-По getWebhookInfo очередь пуста, последней ошибки нет. Пользовательская
+По getWebhookInfo очередь пуста; last_error может содержать историческую ошибку.
+Полные MP4 всех трёх платформ проверены непосредственно через CGI. Пользовательская
 отправка видео через новый webhook ещё требует проверки в Telegram.
 Сервер развёрнут из ветки codex/timeweb-webhook; обновлять явной командой
 git pull --ff-only origin codex/timeweb-webhook после сверки git status.
+Затем отдельно продвигать app через git merge --ff-only до HEAD исходного клона;
+одного pull в ~/skachat недостаточно. Не перезаписывать .env/data/prompt runtime.
 skachatctl.sh блокирует start/restart/update, ensure ничего не запускает.
 
 Webhook: max_connections=3; состояние и квоты раздельны по пользователям
@@ -65,14 +78,15 @@ data/webhook_errors.log содержит только типы исключен�
 полный MP4 2 823 850 байт, временный файл удалён. Для ssstik получение
 файла не подтверждено. Изменения выложены; отправка нового пути через
 Telegram ещё не проверена.
-SaveFrom и внешний загрузчик Instagram не подключены.
+SaveFrom не подключён. Для Instagram теперь основной источник VXInstagram.
 
-Instagram использует resolve_instagram в external_download.py:
-публичная /p/SHORTCODE/embed/captioned/ содержит video_url в JSON либо JSON-строке.
-Личные cookies не читаются, yt-dlp для Reels не вызывается. Развёрнутый код
-дважды полностью скачал присланный Reels: MP4 8 325 643 байта за 16,4 и 1,2 с.
+Instagram использует resolve_instagram в external_download.py: Open Graph
+VXInstagram, профиль TelegramBot для страницы и файла, иначе MP4 отвечает 302.
+Публичная /p/SHORTCODE/embed/captioned/ — резерв, сейчас может давать 302/429.
+Личные cookies не читаются, yt-dlp для Reels не вызывается. Именно через CGI
+дважды полностью скачан Reels: MP4 8 325 643 байта за 1,54 и 1,33 с.
 Временные файлы удалены. HTTPTransport повторяет ошибки соединения дважды.
-Разрешены только HTTPS-файлы Instagram CDN, проверяются MP4 и размер;
+Разрешены только HTTPS-файлы доверенных CDN/VXInstagram, проверяются MP4 и размер;
 редиректы файлов запрещены. Приватные ролики не поддерживаются.
 yt-dlp обновлён на сервере до 2026.10.21 (совместимая с Python 3.10 версия);
 requirements требует >=2026.10.21, библиотека остаётся для YouTube.
