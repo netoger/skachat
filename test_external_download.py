@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from external_download import ServiceError, download_media, resolve_tiktok, resolve_instagram
+from external_download import ServiceError, download_media, resolve_tiktok, resolve_instagram, resolve_instagram_embed
 
 os.environ.setdefault('SYSTEM_PROMPT_PATH', str(Path(__file__).parent / 'system_prompt.example.txt'))
 
@@ -20,8 +20,8 @@ class ServiceTests(unittest.TestCase):
 
         def handler(request):
             requests.append(request.url.host)
-            if request.url.host == 'www.instagram.com':
-                return httpx.Response(200, text=json.dumps({'video_url': 'https://scontent.cdninstagram.com/video.mp4'}))
+            if request.url.path.startswith('/reel/'):
+                return httpx.Response(200, text='<meta property="og:video" content="https://www.vxinstagram.com/offload/example/0.mp4">')
             return httpx.Response(200, content=video)
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent / 'Temp') as folder:
@@ -31,7 +31,7 @@ class ServiceTests(unittest.TestCase):
                 info = bot.probe_video(url)
                 path = bot.download_video(url, Path(folder), info)
                 self.assertEqual(path.read_bytes(), video)
-        self.assertEqual(requests, ['www.instagram.com', 'scontent.cdninstagram.com'])
+        self.assertEqual(requests, ['www.vxinstagram.com', 'www.vxinstagram.com'])
 
     def test_instagram_embed_handles_nested_json_without_personal_cookies(self):
         video = 'https://scontent-fra3-2.cdninstagram.com/video.mp4?a=1&b=2'
@@ -42,7 +42,21 @@ class ServiceTests(unittest.TestCase):
                 self.assertNotIn('cookie', request.headers)
                 return httpx.Response(200, text=page)
             with self.client(handler) as client:
-                self.assertEqual(resolve_instagram('https://www.instagram.com/reel/DfHCqvPtdf6/?tracking=1', client), video)
+                self.assertEqual(resolve_instagram_embed('https://www.instagram.com/reel/DfHCqvPtdf6/?tracking=1', client), video)
+
+    def test_instagram_proxy_failure_uses_anonymous_embed(self):
+        def handler(request):
+            if request.url.host == 'www.vxinstagram.com':
+                return httpx.Response(503)
+            return httpx.Response(200, text='{"video_url":"https://scontent.cdninstagram.com/video.mp4"}')
+        with self.client(handler) as client:
+            self.assertEqual(resolve_instagram('https://instagram.com/reel/example/', client), 'https://scontent.cdninstagram.com/video.mp4')
+
+    def test_instagram_proxy_never_returns_an_untrusted_host(self):
+        page = '<meta property="og:video" content="https://127.0.0.1/offload/example/0.mp4">'
+        with self.client(lambda r: httpx.Response(200, text=page)) as client:
+            with self.assertRaises(ServiceError):
+                resolve_instagram('https://instagram.com/reel/example/', client)
 
     def test_instagram_rejects_missing_video_and_untrusted_cdn(self):
         for page in ['<html>Login required</html>', '{"video_url":"https://127.0.0.1/video.mp4"}',

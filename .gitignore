@@ -9,6 +9,7 @@ instagram_cookies.txt
 *cookies.txt
 # Personal bot prompt - only the example is tracked
 system_prompt.txt
+/system_prompt.php
 .venv/
 data/
 Temp/

@@ -85,7 +85,7 @@ MAX_FILE_SIZE = MAX_DOWNLOAD_MB * 1024 * 1024
 BASE_DIR = Path(__file__).resolve().parent
 # Defaults resolve next to bot.py so the bot runs both locally and in Docker
 # (WORKDIR /app), regardless of the current working directory.
-DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', str(BASE_DIR / 'downloads')))
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', '').strip() or str(BASE_DIR / 'downloads'))
 # Счётчики лимита держим в файле, иначе перезапуск бота обнулял бы их
 AI_USAGE_PATH = Path(os.getenv("AI_USAGE_FILE", str(BASE_DIR / "data" / "ai_usage.json")))
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -675,6 +675,8 @@ def download_video(url: str, job_dir: Path, info: Optional[dict] = None) -> Path
         media_url = (info or probe_video(url))['_service_media_url']
         path = job_dir / ('instagram.mp4' if is_instagram(url) else 'tiktok.mp4')
         referer = 'https://www.instagram.com/' if is_instagram(url) else 'https://ssstik.io/ru'
+        if urlparse(media_url).hostname == 'www.vxinstagram.com':
+            referer = 'https://www.vxinstagram.com/'
         with service_client(referer) as client:
             download_media(media_url, path, MAX_FILE_SIZE, client)
         return path

@@ -28,6 +28,7 @@ def valid_media_url(url):
     hostname = parsed.hostname or ''
     return (parsed.scheme == 'https' and (hostname == 'tikcdn.io'
             or hostname.endswith('.tiktokcdn-us.com')
+            or hostname == 'www.vxinstagram.com'
             or hostname.endswith('.cdninstagram.com')
             or hostname.endswith('.fbcdn.net'))
             and parsed.port in (None, 443) and not parsed.username and not parsed.password)
@@ -56,12 +57,50 @@ class VideoLinks(HTMLParser):
             self.href = ''
 
 
-def resolve_instagram(url, client):
+def instagram_shortcode(url):
     shortcode = re.search(r'/(?:reels?|p)/([A-Za-z0-9_-]{1,50})(?:/|$)', urlsplit(url).path)
     if not shortcode:
         raise ServiceError('Нужна прямая ссылка на публичный Reels или видеопост Instagram.')
+    return shortcode.group(1)
+
+
+class InstagramVideoMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.urls = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'meta' and attrs.get('property') in ('og:video', 'og:video:secure_url'):
+            self.urls.append(attrs.get('content', ''))
+
+
+def resolve_instagram(url, client):
+    shortcode = instagram_shortcode(url)
     try:
-        response = client.get('https://www.instagram.com/p/' + shortcode.group(1) + '/embed/captioned/')
+        response = client.get('https://www.vxinstagram.com/reel/' + shortcode + '/', headers={
+            'User-Agent': 'TelegramBot (like TwitterBot)', 'Referer': 'https://www.vxinstagram.com/',
+        })
+        response.raise_for_status()
+        if len(response.content) > 4 * 1024 * 1024:
+            raise ServiceError('Сервис вернул слишком большую страницу.')
+        metadata = InstagramVideoMetadata()
+        metadata.feed(response.text)
+        for video_url in metadata.urls:
+            parsed = urlsplit(video_url)
+            if (valid_media_url(video_url) and parsed.hostname == 'www.vxinstagram.com'
+                    and parsed.path.startswith('/offload/' + shortcode + '/')):
+                return video_url
+    except (httpx.HTTPError, ValueError, ServiceError):
+        pass
+    # Резерв без авторизации, если внешний сервис недоступен.
+    return resolve_instagram_embed(url, client)
+
+
+def resolve_instagram_embed(url, client):
+    shortcode = instagram_shortcode(url)
+    try:
+        response = client.get('https://www.instagram.com/p/' + shortcode + '/embed/captioned/')
         response.raise_for_status()
         if len(response.content) > 4 * 1024 * 1024:
             raise ServiceError('Instagram вернул слишком большую страницу.')
