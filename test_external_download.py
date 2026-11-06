@@ -13,6 +13,17 @@ os.environ.setdefault('SYSTEM_PROMPT_PATH', str(Path(__file__).parent / 'system_
 
 
 class ServiceTests(unittest.TestCase):
+    def test_proxy_media_uses_same_embed_agent_as_metadata(self):
+        video = b'\x00\x00\x00\x18ftypmp42' + b'x' * 10
+        def handler(request):
+            self.assertEqual(request.headers['User-Agent'], 'TelegramBot (like TwitterBot)')
+            return httpx.Response(200, content=video)
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent / 'Temp') as folder:
+            with self.client(handler) as client:
+                path = Path(folder) / 'video.mp4'
+                download_media('https://www.vxinstagram.com/offload/example/0.mp4', path, 200, client)
+                self.assertEqual(path.read_bytes(), video)
+
     def test_bot_reels_route_resolves_once_and_downloads_without_ytdlp(self):
         import bot
         video = b'\x00\x00\x00\x18ftypmp42' + b'x' * 100

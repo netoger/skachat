@@ -167,7 +167,8 @@ def download_media(url, path: Path, max_bytes, client):
             raise ServiceError('Сервис вернул неподдерживаемый адрес файла.')
         started = time.monotonic()
         # Редиректы намеренно не разрешены: адрес получен от внешнего сервиса.
-        with client.stream('GET', url, follow_redirects=False) as response:
+        headers = {'User-Agent': 'TelegramBot (like TwitterBot)'} if urlsplit(url).hostname == 'www.vxinstagram.com' else {}
+        with client.stream('GET', url, follow_redirects=False, headers=headers) as response:
             response.raise_for_status()
             size = response.headers.get('Content-Length')
             if size and int(size) > max_bytes:
